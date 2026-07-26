@@ -1,0 +1,46 @@
+spring:
+  application:
+    name: rent-flow-reservation
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+      fail-on-unknown-properties: true
+      fail-on-ignored-properties: true
+  datasource:
+    hikari:
+      connection-timeout: 1000
+      validation-timeout: 500
+  flyway:
+    create-schemas: false
+    default-schema: reservation
+    schemas: reservation
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        default_schema: reservation
+  sql:
+    init:
+      mode: never
+
+springdoc:
+  paths-to-match: /api/v1/**
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+        add-additional-paths: true
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+      show-details: never

@@ -1,0 +1,37 @@
+services:
+  rentflow-postgres:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_DB: rentflow
+      POSTGRES_USER: rentflow_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rentflow-admin-local}
+      RESERVATION_DB_USER: ${RESERVATION_DB_USER:-reservation}
+      RESERVATION_DB_PASSWORD: ${RESERVATION_DB_PASSWORD:-reservation-local}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - rentflow-postgres-data:/var/lib/postgresql
+      - ./docker/postgres/init-reservation.sh:/docker-entrypoint-initdb.d/init-reservation.sh:ro
+    healthcheck:
+      test: pg_isready --username "$${POSTGRES_USER}" --dbname "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  reservation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://rentflow-postgres:5432/rentflow
+      SPRING_DATASOURCE_USERNAME: ${RESERVATION_DB_USER:-reservation}
+      SPRING_DATASOURCE_PASSWORD: ${RESERVATION_DB_PASSWORD:-reservation-local}
+    depends_on:
+      rentflow-postgres:
+        condition: service_healthy
+    ports:
+      - "${RESERVATION_PORT:-8082}:8080"
+
+volumes:
+  rentflow-postgres-data:

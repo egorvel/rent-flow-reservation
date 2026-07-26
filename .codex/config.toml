@@ -1,0 +1,10 @@
+[features]
+hooks = true
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = 'python3 "/home/yegor/AI Course/audit-log-service/.codex/hooks/spec_self_eval_stop.py"'
+timeout = 600
+statusMessage = "Running spec self-eval"
