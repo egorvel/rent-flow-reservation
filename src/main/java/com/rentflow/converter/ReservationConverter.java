@@ -2,20 +2,22 @@ package com.rentflow.converter;
 
 import org.springframework.stereotype.Component;
 
-import com.rentflow.dto.CreateReservationRequest;
+import com.rentflow.dto.CreateReservationsRequest;
 import com.rentflow.dto.ReservationDTO;
 import com.rentflow.model.Reservation;
+import com.rentflow.model.ReservationCreationCommand;
 import com.rentflow.model.ReservationStatus;
 
 @Component
 public class ReservationConverter {
-    public Reservation toModel(CreateReservationRequest request) {
-        return new Reservation(
-                request.serialNumber(),
+    public ReservationCreationCommand toCommand(CreateReservationsRequest request) {
+        return new ReservationCreationCommand(
                 request.customerId(),
                 request.orderId(),
-                request.startDate(),
-                request.endDate());
+                request.items().stream()
+                        .map(item -> new ReservationCreationCommand.Item(
+                                item.serialNumber(), item.startDate(), item.endDate()))
+                        .toList());
     }
 
     public Reservation toModel(ReservationDTO request) {

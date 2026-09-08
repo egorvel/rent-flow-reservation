@@ -15,17 +15,23 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
-import com.rentflow.dto.CreateReservationRequest;
+import com.rentflow.dto.CreateReservationItemRequest;
+import com.rentflow.dto.CreateReservationsRequest;
 import com.rentflow.dto.ProblemResponse;
 import com.rentflow.dto.ReservationDTO;
+import com.rentflow.model.InventoryClaimResult;
+import com.rentflow.service.InventoryGateway;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -39,8 +45,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class OpenApiIT extends PostgresIntegrationTest {
     private static final String COLLECTION = "/api/v1/reservations";
     private static final String ITEM = COLLECTION + "/{id}";
-    private static final Set<String> INPUT_FIELDS =
-            Set.of("serialNumber", "customerId", "orderId", "startDate", "endDate");
+    private static final Set<String> INPUT_FIELDS = Set.of("customerId", "orderId", "items");
 
     @Autowired
     private MockMvc mvc;
@@ -51,10 +56,14 @@ class OpenApiIT extends PostgresIntegrationTest {
     @Autowired
     private Validator validator;
 
+    @MockitoBean
+    private InventoryGateway inventoryGateway;
+
     private JsonNode document;
 
     @BeforeEach
     void readDocument() throws Exception {
+        when(inventoryGateway.claim(any(), any())).thenReturn(InventoryClaimResult.claimed());
         document = mapper.readTree(mvc.perform(get("/v3/api-docs"))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
@@ -85,7 +94,8 @@ class OpenApiIT extends PostgresIntegrationTest {
 
     @Test
     void sharedReplacementAndResponseSchemaMarksManagedFieldsReadOnly() {
-        JsonNode create = schema("CreateReservationRequest");
+        JsonNode create = schema("CreateReservationsRequest");
+        JsonNode createItem = schema("CreateReservationItemRequest");
         JsonNode response = schema("ReservationDTO");
         assertThat(schema("ReplaceReservationRequest").isMissingNode()).isTrue();
         assertThat(create.path("properties").propertyNames()).containsExactlyInAnyOrderElementsOf(INPUT_FIELDS);
@@ -114,22 +124,28 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertThat(strings(response.path("required")))
                 .containsExactlyInAnyOrder(
                         "id", "serialNumber", "customerId", "orderId", "startDate", "endDate", "timestamp", "status");
-        for (String name : List.of("CreateReservationRequest", "ReservationDTO")) {
+        for (String name : List.of("ReservationDTO")) {
             JsonNode properties = schema(name).path("properties");
             assertThat(properties.at("/serialNumber/pattern").asString())
-                    .isEqualTo(CreateReservationRequest.SERIAL_NUMBER_PATTERN);
+                    .isEqualTo(ReservationDTO.SERIAL_NUMBER_PATTERN);
             assertThat(properties.at("/serialNumber/maxLength").asInt()).isEqualTo(64);
             assertThat(properties.at("/customerId/maxLength").asInt()).isEqualTo(64);
             assertThat(properties.at("/orderId/maxLength").asInt()).isEqualTo(64);
             assertThat(properties.at("/startDate/format").asString()).isEqualTo("date");
             assertThat(properties.at("/endDate/format").asString()).isEqualTo("date");
         }
+        assertThat(create.at("/properties/customerId/maxLength").asInt()).isEqualTo(64);
+        assertThat(create.at("/properties/orderId/maxLength").asInt()).isEqualTo(64);
+        assertThat(create.at("/properties/items/minItems").asInt()).isEqualTo(1);
+        assertThat(create.at("/properties/items/maxItems").asInt()).isEqualTo(100);
+        assertThat(createItem.path("properties").propertyNames())
+                .containsExactlyInAnyOrder("serialNumber", "startDate", "endDate");
         assertThat(strings(response.at("/properties/status/enum")))
                 .containsExactlyInAnyOrder("HELD", "CONFIRMED", "CANCELLED");
         assertThat(operation(COLLECTION, "post")
                         .at("/requestBody/content/application~1json/schema/$ref")
                         .asString())
-                .endsWith("/CreateReservationRequest");
+                .endsWith("/CreateReservationsRequest");
         assertThat(operation(ITEM, "put")
                         .at("/requestBody/content/application~1json/schema/$ref")
                         .asString())
@@ -137,17 +153,25 @@ class OpenApiIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void documentsSuccessErrorsLocationAndPaging() {
+    void documentsSuccessErrorsIdempotencyAndPaging() {
         assertThat(operation(COLLECTION, "post").path("responses").propertyNames())
-                .contains("201", "400", "405", "406", "415", "500");
+                .contains("201", "400", "405", "406", "409", "415", "422", "500", "502", "503");
         assertThat(operation(COLLECTION, "post")
                         .at("/responses/201/headers/Location")
                         .isMissingNode())
-                .isFalse();
+                .isTrue();
         assertThat(operation(COLLECTION, "post")
-                        .at("/responses/201/content/application~1json/schema/$ref")
+                        .at("/responses/201/content/application~1json/schema/items/$ref")
                         .asString())
                 .endsWith("/ReservationDTO");
+        assertThat(operation(COLLECTION, "post")
+                        .at("/responses/201/headers/Idempotency-Replayed")
+                        .isMissingNode())
+                .isFalse();
+        assertThat(operation(COLLECTION, "post")
+                        .at("/responses/409/headers/Retry-After")
+                        .isMissingNode())
+                .isFalse();
         for (String method : List.of("get", "put", "delete")) {
             JsonNode responses = operation(ITEM, method).path("responses");
             assertThat(responses.propertyNames())
@@ -177,8 +201,8 @@ class OpenApiIT extends PostgresIntegrationTest {
     @Test
     void examplesDeserializeAndMeetBeanConstraints() {
         for (Map.Entry<String, Class<?>> entry : Map.<String, Class<?>>of(
-                        "CreateReservationRequest",
-                        CreateReservationRequest.class,
+                        "CreateReservationsRequest",
+                        CreateReservationsRequest.class,
                         "ProblemResponse",
                         ProblemResponse.class)
                 .entrySet()) {
@@ -224,30 +248,30 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertThat(request.id()).isNull();
         assertThat(request.timestamp()).isNull();
 
-        CreateReservationRequest creation = new CreateReservationRequest(
-                request.serialNumber(),
+        CreateReservationsRequest creation = new CreateReservationsRequest(
                 request.customerId(),
                 request.orderId(),
-                request.startDate(),
-                request.endDate());
+                List.of(new CreateReservationItemRequest(
+                        request.serialNumber(), request.startDate(), request.endDate())));
         JsonNode created = mapper.readTree(mvc.perform(post(COLLECTION)
+                        .header("Idempotency-Key", UUID.randomUUID())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(mapper.writeValueAsString(creation)))
                 .andExpect(status().isCreated())
                 .andReturn()
                 .getResponse()
                 .getContentAsByteArray());
-        JsonNode replaced = mapper.readTree(
-                mvc.perform(put(COLLECTION + "/" + created.path("id").asString())
+        JsonNode replaced = mapper.readTree(mvc.perform(
+                        put(COLLECTION + "/" + created.get(0).path("id").asString())
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(mapper.writeValueAsString(replacementExample)))
-                        .andExpect(status().isOk())
-                        .andExpect(jsonPath("$.id").value(created.path("id").asString()))
-                        .andExpect(jsonPath("$.timestamp")
-                                .value(created.path("timestamp").asString()))
-                        .andReturn()
-                        .getResponse()
-                        .getContentAsByteArray());
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(created.get(0).path("id").asString()))
+                .andExpect(jsonPath("$.timestamp")
+                        .value(created.get(0).path("timestamp").asString()))
+                .andReturn()
+                .getResponse()
+                .getContentAsByteArray());
         for (String field : replacementExample.propertyNames()) {
             assertThat(replaced.path(field)).as(field).isEqualTo(replacementExample.path(field));
         }

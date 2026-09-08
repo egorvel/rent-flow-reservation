@@ -29,6 +29,7 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.rentflow.dto.ProblemResponse;
 import com.rentflow.dto.ViolationResponse;
+import com.rentflow.service.ReservationCreationValidationException;
 import com.rentflow.service.ReservationNotFoundException;
 
 import tools.jackson.databind.exc.InvalidFormatException;
@@ -66,6 +67,16 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<ProblemResponse> handleRequestValidation(RequestValidationException exception, WebRequest request) {
         return validationResponse(
                 exception.getViolations().stream().sorted(VIOLATION_ORDER).toList(), request);
+    }
+
+    @ExceptionHandler(ReservationCreationValidationException.class)
+    ResponseEntity<ProblemResponse> handleReservationCreationValidation(
+            ReservationCreationValidationException exception, WebRequest request) {
+        List<ViolationResponse> violations = exception.getViolations().stream()
+                .map(violation -> new ViolationResponse(violation.field(), violation.message()))
+                .sorted(VIOLATION_ORDER)
+                .toList();
+        return validationResponse(violations, request);
     }
 
     @Override

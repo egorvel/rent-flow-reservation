@@ -1,6 +1,7 @@
 package com.rentflow;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -18,11 +19,20 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
+import com.rentflow.model.InventoryClaimResult;
+import com.rentflow.model.Reservation;
+import com.rentflow.model.ReservationCreationFailure;
+import com.rentflow.model.ReservationStatus;
+import com.rentflow.repository.ReservationCreationRequestRepository;
 import com.rentflow.repository.ReservationRepository;
+import com.rentflow.service.InventoryGateway;
+import com.rentflow.service.InventoryServiceUnavailableException;
+import com.rentflow.service.ReservationCreationStoreService;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import tools.jackson.databind.JsonNode;
@@ -31,6 +41,11 @@ import tools.jackson.databind.ObjectMapper;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -59,9 +74,21 @@ class ReservationIT extends PostgresIntegrationTest {
     @Autowired
     private ReservationRepository repository;
 
+    @Autowired
+    private ReservationCreationRequestRepository workflowRepository;
+
+    @Autowired
+    private ReservationCreationStoreService creationStore;
+
+    @MockitoBean
+    private InventoryGateway inventoryGateway;
+
     @BeforeEach
     void clearReservations() {
+        workflowRepository.deleteAllInBatch();
         repository.deleteAllInBatch();
+        reset(inventoryGateway);
+        when(inventoryGateway.claim(any(), any())).thenReturn(InventoryClaimResult.claimed());
     }
 
     @Test
@@ -80,11 +107,178 @@ class ReservationIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void acceptsDuplicateSerialAndCustomerEvenForTheSamePeriod() throws Exception {
-        JsonNode first = create(CREATE);
-        JsonNode second = create(CREATE);
-        assertThat(second.path("id").asString()).isNotEqualTo(first.path("id").asString());
+    void rejectsAnotherActiveReservationForTheSameSerial() throws Exception {
+        create(CREATE);
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(batch(CREATE)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("ACTIVE_RESERVATION_EXISTS"))
+                .andExpect(jsonPath("$.failedItems[0].index").value(0));
+        assertThat(repository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void ignoresAnOutdatedConfirmedReservation() throws Exception {
+        Reservation outdated = new Reservation(
+                "DRILL-001", "old-customer", "old-order", LocalDate.of(2000, 1, 1), LocalDate.of(2000, 1, 2));
+        outdated.changeStatus(ReservationStatus.CONFIRMED);
+        repository.saveAndFlush(outdated);
+
+        create(CREATE);
+
         assertThat(repository.count()).isEqualTo(2);
+    }
+
+    @Test
+    void replaysACompletedBatchWithoutCallingInventoryAgain() throws Exception {
+        UUID key = UUID.randomUUID();
+        String body = batch(CREATE);
+        byte[] first = mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Idempotency-Replayed", "false"))
+                .andReturn()
+                .getResponse()
+                .getContentAsByteArray();
+        byte[] replay = mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Idempotency-Replayed", "true"))
+                .andReturn()
+                .getResponse()
+                .getContentAsByteArray();
+
+        assertThat(replay).isEqualTo(first);
+        assertThat(repository.count()).isOne();
+        verify(inventoryGateway, times(1)).claim(any(), any());
+    }
+
+    @Test
+    void rollsBackTheWholeBatchWhenInventoryRejectsOneItem() throws Exception {
+        when(inventoryGateway.claim(any(), any()))
+                .thenReturn(InventoryClaimResult.terminal(
+                        InventoryClaimResult.Type.UNAVAILABLE,
+                        List.of(new ReservationCreationFailure(
+                                1, "MIXER-001", "INVENTORY_ITEM_UNAVAILABLE", "Inventory item is not available."))));
+        String body = """
+                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                  {"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"},
+                  {"serialNumber":"MIXER-001","startDate":"2026-10-01","endDate":"2026-10-03"}
+                ]}
+                """;
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("INVENTORY_ITEM_UNAVAILABLE"))
+                .andExpect(jsonPath("$.failedItems[0].index").value(1));
+        assertThat(repository.count()).isZero();
+    }
+
+    @Test
+    void resumesTemporaryInventoryFailureWithTheSameKey() throws Exception {
+        UUID key = UUID.randomUUID();
+        String body = batch(CREATE);
+        when(inventoryGateway.claim(any(), any()))
+                .thenThrow(new InventoryServiceUnavailableException(new IllegalStateException()))
+                .thenReturn(InventoryClaimResult.claimed());
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("INVENTORY_SERVICE_UNAVAILABLE"));
+        assertThat(repository.count()).isZero();
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated());
+        assertThat(repository.count()).isOne();
+        verify(inventoryGateway, times(2)).claim(org.mockito.ArgumentMatchers.eq(key), any());
+    }
+
+    @Test
+    void returnsFixedRetryHeaderWhenInventoryIsBusy() throws Exception {
+        when(inventoryGateway.claim(any(), any())).thenReturn(InventoryClaimResult.busy());
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(batch(CREATE)))
+                .andExpect(status().isConflict())
+                .andExpect(header().string("Retry-After", "1"))
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_IN_PROGRESS"));
+
+        assertThat(repository.count()).isZero();
+    }
+
+    @Test
+    void recoveryCannotClaimARequestBeforeItsNextAttempt() throws Exception {
+        UUID key = UUID.randomUUID();
+        when(inventoryGateway.claim(any(), any()))
+                .thenThrow(new InventoryServiceUnavailableException(new IllegalStateException()));
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(batch(CREATE)))
+                .andExpect(status().isServiceUnavailable());
+
+        assertThat(creationStore.claimForRecovery(key, UUID.randomUUID())).isEmpty();
+    }
+
+    @Test
+    void rejectsAChangedPayloadForAnUnexpiredKey() throws Exception {
+        UUID key = UUID.randomUUID();
+        String first = batch(CREATE);
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(first))
+                .andExpect(status().isCreated());
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(first.replace("ORDER-001", "ORDER-002")))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"));
+        assertThat(repository.count()).isOne();
+        verify(inventoryGateway, times(1)).claim(any(), any());
+    }
+
+    @Test
+    void rejectsMissingKeyAndDuplicateSerialsBeforeWorkflowOrInventory() throws Exception {
+        String duplicate = """
+                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                  {"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"},
+                  {"serialNumber":"DRILL-001","startDate":"2026-10-04","endDate":"2026-10-05"}
+                ]}
+                """;
+        mvc.perform(post(PATH).contentType(MediaType.APPLICATION_JSON).content(batch(CREATE)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.violations[0].field").value("Idempotency-Key"));
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(duplicate))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.violations[0].field").value("items[1].serialNumber"));
+
+        assertThat(workflowRepository.count()).isZero();
+        assertThat(repository.count()).isZero();
+        verify(inventoryGateway, times(0)).claim(any(), any());
     }
 
     @ParameterizedTest
@@ -204,8 +398,8 @@ class ReservationIT extends PostgresIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"2026-10-01", "2000-01-01", "0001-01-01", "9999-12-31"})
-    void acceptsSameDayHistoricalAndBoundaryYears(String day) throws Exception {
+    @ValueSource(strings = {"2026-10-01", "9999-12-31"})
+    void acceptsSameDayCurrentOrFuturePeriods(String day) throws Exception {
         create(CREATE.replace("2026-10-01", day).replace("2026-10-03", day));
     }
 
@@ -258,12 +452,10 @@ class ReservationIT extends PostgresIntegrationTest {
     @Test
     void missingFieldsProduceSortedViolations() throws Exception {
         problem(post(PATH).contentType(MediaType.APPLICATION_JSON).content("{}"), 400, "VALIDATION_FAILED")
-                .andExpect(jsonPath("$.violations", hasSize(5)))
+                .andExpect(jsonPath("$.violations", hasSize(3)))
                 .andExpect(jsonPath("$.violations[0].field").value("customerId"))
-                .andExpect(jsonPath("$.violations[1].field").value("endDate"))
-                .andExpect(jsonPath("$.violations[2].field").value("orderId"))
-                .andExpect(jsonPath("$.violations[3].field").value("serialNumber"))
-                .andExpect(jsonPath("$.violations[4].field").value("startDate"));
+                .andExpect(jsonPath("$.violations[1].field").value("items"))
+                .andExpect(jsonPath("$.violations[2].field").value("orderId"));
     }
 
     @Test
@@ -277,7 +469,9 @@ class ReservationIT extends PostgresIntegrationTest {
                 .andExpect(jsonPath("$.page.totalPages").value(0));
         List<String> ids = new ArrayList<>();
         for (int i = 0; i < 3; i++) {
-            ids.add(create(CREATE).path("id").asString());
+            ids.add(create(CREATE.replace("DRILL-001", "DRILL-00" + (i + 1)))
+                    .path("id")
+                    .asString());
         }
         ids.sort(Comparator.naturalOrder());
         JsonNode page = body(mvc.perform(get(PATH)).andExpect(status().isOk()));
@@ -327,7 +521,8 @@ class ReservationIT extends PostgresIntegrationTest {
     void sortsAllFieldsDeterministically(String field, String direction) throws Exception {
         List<JsonNode> expected = new ArrayList<>();
         for (int i = 0; i < 3; i++) {
-            String input = i == 0 ? CREATE.replace("001", "002").replace("2026-10-01", "2026-10-02") : CREATE;
+            String suffix = "%03d".formatted(i + 1);
+            String input = CREATE.replace("001", suffix).replace("2026-10-01", "2026-10-0" + (i + 1));
             JsonNode created = create(input);
             String replacement = withStatus(input, i == 0 ? "CANCELLED" : "CONFIRMED");
             expected.add(body(mvc.perform(put(PATH + "/" + created.path("id").asString())
@@ -409,14 +604,29 @@ class ReservationIT extends PostgresIntegrationTest {
     }
 
     private JsonNode create(String request) throws Exception {
-        ResultActions result = mvc.perform(
-                        post(PATH).contentType(MediaType.APPLICATION_JSON).content(request))
+        ResultActions result = mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(batch(request)))
                 .andExpect(status().isCreated())
-                .andExpect(content().contentType(MediaType.APPLICATION_JSON));
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(header().string("Idempotency-Replayed", "false"))
+                .andExpect(header().doesNotExist("Location"));
         JsonNode created = body(result);
-        result.andExpect(
-                header().string("Location", PATH + "/" + created.path("id").asString()));
-        return created;
+        assertThat(created.isArray()).isTrue();
+        return created.get(0);
+    }
+
+    private String batch(String request) throws Exception {
+        JsonNode item = mapper.readTree(request);
+        return """
+                {"customerId":"%s","orderId":"%s","items":[{"serialNumber":"%s","startDate":"%s","endDate":"%s"}]}
+                """.formatted(
+                        item.path("customerId").asString(),
+                        item.path("orderId").asString(),
+                        item.path("serialNumber").asString(),
+                        item.path("startDate").asString(),
+                        item.path("endDate").asString());
     }
 
     private JsonNode read(String id) throws Exception {

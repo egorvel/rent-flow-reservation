@@ -1,0 +1,40 @@
+package com.rentflow.service;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+
+import com.rentflow.model.ReservationCreationCommand;
+
+public final class IdempotencyFingerprint {
+    private static final String VERSION = "reservation-creation-v1";
+
+    private IdempotencyFingerprint() {}
+
+    public static String of(ReservationCreationCommand command) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            add(digest, VERSION);
+            add(digest, command.customerId());
+            add(digest, command.orderId());
+            digest.update(ByteBuffer.allocate(Integer.BYTES)
+                    .putInt(command.items().size())
+                    .array());
+            for (ReservationCreationCommand.Item item : command.items()) {
+                add(digest, item.serialNumber());
+                add(digest, item.startDate().toString());
+                add(digest, item.endDate().toString());
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
+    }
+
+    private static void add(MessageDigest digest, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());
+        digest.update(bytes);
+    }
+}

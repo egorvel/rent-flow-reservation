@@ -21,11 +21,6 @@ public class ReservationService {
         this.repository = repository;
     }
 
-    @Transactional
-    public Reservation create(Reservation reservation) {
-        return repository.saveAndFlush(reservation);
-    }
-
     @Transactional(readOnly = true)
     public Reservation get(UUID id) {
         return repository.findById(id).orElseThrow(() -> new ReservationNotFoundException(id));

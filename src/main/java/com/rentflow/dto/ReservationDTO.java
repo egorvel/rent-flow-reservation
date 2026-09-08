@@ -44,9 +44,9 @@ public record ReservationDTO(
                 example = "DRILL-001",
                 minLength = 1,
                 maxLength = 64,
-                pattern = CreateReservationRequest.SERIAL_NUMBER_PATTERN,
+                pattern = ReservationDTO.SERIAL_NUMBER_PATTERN,
                 requiredMode = Schema.RequiredMode.REQUIRED)
-        @NotBlank(message = "must not be blank") @Pattern(regexp = CreateReservationRequest.SERIAL_NUMBER_PATTERN, message = "must be a valid serial number") String serialNumber,
+        @NotBlank(message = "must not be blank") @Pattern(regexp = ReservationDTO.SERIAL_NUMBER_PATTERN, message = "must be a valid serial number") String serialNumber,
 
         @Schema(
                 description = "Opaque client-assigned customer identifier; no existence or uniqueness check.",
@@ -96,4 +96,6 @@ public record ReservationDTO(
                 example = "HELD",
                 allowableValues = {"HELD", "CONFIRMED", "CANCELLED"},
                 requiredMode = Schema.RequiredMode.REQUIRED)
-        @NotNull(message = "must not be null") @Pattern(regexp = "HELD|CONFIRMED|CANCELLED", message = "must be HELD, CONFIRMED, or CANCELLED") String status) {}
+        @NotNull(message = "must not be null") @Pattern(regexp = "HELD|CONFIRMED|CANCELLED", message = "must be HELD, CONFIRMED, or CANCELLED") String status) {
+    public static final String SERIAL_NUMBER_PATTERN = "[A-Za-z0-9][A-Za-z0-9._-]{0,63}";
+}

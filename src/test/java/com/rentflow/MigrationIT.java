@@ -4,6 +4,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.Map;
@@ -23,6 +24,8 @@ import org.springframework.test.annotation.DirtiesContext;
 
 import com.rentflow.model.Reservation;
 import com.rentflow.repository.ReservationRepository;
+import com.rentflow.service.DatabaseTimeProvider;
+import com.rentflow.service.DatabaseTimeSnapshot;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -40,6 +43,9 @@ class MigrationIT extends PostgresIntegrationTest {
     @Autowired
     private ReservationRepository repository;
 
+    @Autowired
+    private DatabaseTimeProvider databaseTimeProvider;
+
     @Test
     void usesOnlyItsRestrictedRoleAndOwnedSchema() throws Exception {
         assertThat(jdbc.queryForObject("SELECT current_user", String.class)).isEqualTo("reservation");
@@ -56,7 +62,7 @@ class MigrationIT extends PostgresIntegrationTest {
         assertThat(jdbc.queryForList(
                         "SELECT tablename FROM pg_tables WHERE schemaname = 'reservation' AND tableowner = 'reservation'",
                         String.class))
-                .containsExactlyInAnyOrder("reservations", "flyway_schema_history");
+                .containsExactlyInAnyOrder("reservations", "reservation_creation_requests", "flyway_schema_history");
         assertThat(jdbc.queryForObject(
                         "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('reservations', 'flyway_schema_history')",
                         Integer.class))
@@ -77,13 +83,17 @@ class MigrationIT extends PostgresIntegrationTest {
 
     @Test
     void migrationsRunOnceAndCommittedDataSurvivesRestart() {
+        Instant databaseBefore = databaseTimeProvider.now().observedAt();
         Reservation saved = repository.saveAndFlush(new Reservation(
                 "RESTART-001", "CUSTOMER-1", "ORDER-1", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3)));
+        Instant databaseAfter = databaseTimeProvider.now().observedAt();
+        assertThat(saved.getTimestamp()).isBetween(databaseBefore, databaseAfter);
+        assertThat(saved.getTimestamp().getNano() % 1000).isZero();
         assertThat(flyway.migrate().migrationsExecuted).isZero();
         assertThat(jdbc.queryForObject(
-                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version = '1' AND success",
+                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2') AND success",
                         Integer.class))
-                .isOne();
+                .isEqualTo(2);
         try (ConfigurableApplicationContext context = start(Map.of())) {
             Reservation restored = context.getBean(ReservationRepository.class)
                     .findById(saved.getId())
@@ -98,7 +108,7 @@ class MigrationIT extends PostgresIntegrationTest {
         assertThat(jdbc.queryForList(
                         "SELECT indexname FROM pg_indexes WHERE schemaname = 'reservation' AND tablename = 'reservations'",
                         String.class))
-                .containsExactly("reservations_pkey");
+                .containsExactlyInAnyOrder("reservations_pkey", "idx_reservations_creation_active_lookup");
         insert("DUPLICATE-001", "CUSTOMER-1", "ORDER-1", "2026-10-01", "2026-10-03", "HELD");
         insert("DUPLICATE-001", "CUSTOMER-1", "ORDER-1", "2026-10-01", "2026-10-03", "HELD");
         assertThat(jdbc.queryForObject(
@@ -111,6 +121,20 @@ class MigrationIT extends PostgresIntegrationTest {
         assertInvalid("A", "C", "O", "2026-10-03", "2026-10-01", "HELD");
         assertInvalid("A", "C", "O", "10000-01-01", "10000-01-02", "HELD");
         assertInvalid("A", "C", "O", "2026-10-01", "2026-10-03", "EXPIRED");
+    }
+
+    @Test
+    void databaseTimeReturnsOneUtcSample() {
+        DatabaseTimeSnapshot time = databaseTimeProvider.now();
+        assertThat(time.utcDate())
+                .isEqualTo(time.observedAt().atOffset(java.time.ZoneOffset.UTC).toLocalDate());
+        assertThat(jdbc.queryForObject(
+                        "SELECT (TIMESTAMPTZ '2026-09-08 23:59:59.999999+00' AT TIME ZONE 'UTC')::date",
+                        LocalDate.class))
+                .isEqualTo(LocalDate.of(2026, 9, 8));
+        assertThat(jdbc.queryForObject(
+                        "SELECT (TIMESTAMPTZ '2026-09-09 00:00:00+00' AT TIME ZONE 'UTC')::date", LocalDate.class))
+                .isEqualTo(LocalDate.of(2026, 9, 9));
     }
 
     @Test

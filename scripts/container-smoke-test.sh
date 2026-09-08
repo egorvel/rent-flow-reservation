@@ -2,7 +2,11 @@
 set -Eeuo pipefail
 
 readonly PROJECT_NAME="rentflow-reservation-smoke-$$-${RANDOM}"
-readonly CREATE_REQUEST='{"serialNumber":"SMOKE-001","customerId":"CUSTOMER-SMOKE","orderId":"ORDER-SMOKE","startDate":"2026-10-01","endDate":"2026-10-03"}'
+readonly IDEMPOTENCY_KEY="$(cat /proc/sys/kernel/random/uuid)"
+readonly RECOVERY_KEY="$(cat /proc/sys/kernel/random/uuid)"
+readonly SMOKE_DATE="$(date -u -d '+1 day' +%F)"
+readonly CREATE_REQUEST="{\"customerId\":\"CUSTOMER-SMOKE\",\"orderId\":\"ORDER-SMOKE\",\"items\":[{\"serialNumber\":\"SMOKE-001\",\"startDate\":\"${SMOKE_DATE}\",\"endDate\":\"${SMOKE_DATE}\"}]}"
+readonly RECOVERY_REQUEST="{\"customerId\":\"CUSTOMER-SMOKE\",\"orderId\":\"ORDER-RECOVERY\",\"items\":[{\"serialNumber\":\"SMOKE-RECOVERY\",\"startDate\":\"${SMOKE_DATE}\",\"endDate\":\"${SMOKE_DATE}\"}]}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}/.."
 
@@ -74,11 +78,21 @@ wait_http /livez 200
 wait_http /readyz 200
 
 info "Creating a HELD reservation"
-response="$(curl --fail --silent --show-error --max-time 5 --request POST --header 'Content-Type: application/json' --data "$CREATE_REQUEST" "${BASE_URL}/api/v1/reservations")"
-jq --exit-status '.status == "HELD" and .serialNumber == "SMOKE-001" and .customerId == "CUSTOMER-SMOKE" and .orderId == "ORDER-SMOKE" and .startDate == "2026-10-01" and .endDate == "2026-10-03" and (.timestamp | endswith("Z"))' <<<"$response" >/dev/null
-RESERVATION_ID="$(jq --raw-output --exit-status '.id' <<<"$response")"
-EXPECTED_RESPONSE="$(jq --compact-output --sort-keys . <<<"$response")"
+response="$(curl --fail --silent --show-error --max-time 5 --request POST --header 'Content-Type: application/json' --header "Idempotency-Key: $IDEMPOTENCY_KEY" --data "$CREATE_REQUEST" "${BASE_URL}/api/v1/reservations")"
+jq --exit-status --arg date "$SMOKE_DATE" 'length == 1 and .[0].status == "HELD" and .[0].serialNumber == "SMOKE-001" and .[0].customerId == "CUSTOMER-SMOKE" and .[0].orderId == "ORDER-SMOKE" and .[0].startDate == $date and .[0].endDate == $date and (.[0].timestamp | endswith("Z"))' <<<"$response" >/dev/null
+replay="$(curl --fail --silent --show-error --max-time 5 --request POST --header 'Content-Type: application/json' --header "Idempotency-Key: $IDEMPOTENCY_KEY" --data "$CREATE_REQUEST" "${BASE_URL}/api/v1/reservations")"
+[[ "$replay" == "$response" ]] || fail "Idempotent replay changed the response"
+RESERVATION_ID="$(jq --raw-output --exit-status '.[0].id' <<<"$response")"
+EXPECTED_RESPONSE="$(jq --compact-output --sort-keys '.[0]' <<<"$response")"
 assert_readable
+
+info "Recovering a durable creation intent after an Inventory outage"
+compose stop inventory
+outage_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 6 --request POST --header 'Content-Type: application/json' --header "Idempotency-Key: $RECOVERY_KEY" --data "$RECOVERY_REQUEST" "${BASE_URL}/api/v1/reservations" || true)"
+[[ "$outage_status" == 503 ]] || fail "Inventory outage did not leave a recoverable 503 intent"
+compose up --detach --wait --wait-timeout 30 inventory
+recovered="$(curl --fail --silent --show-error --max-time 5 --request POST --header 'Content-Type: application/json' --header "Idempotency-Key: $RECOVERY_KEY" --data "$RECOVERY_REQUEST" "${BASE_URL}/api/v1/reservations")"
+jq --exit-status 'length == 1 and .[0].serialNumber == "SMOKE-RECOVERY" and .[0].status == "HELD"' <<<"$recovered" >/dev/null
 
 info "Verifying application restart persistence"
 compose restart reservation
@@ -102,7 +116,7 @@ base_url
 wait_http /readyz 200
 assert_readable
 info "Verifying replacement and permanent deletion"
-replacement="$(jq --compact-output '. + {status: "CONFIRMED"}' <<<"$CREATE_REQUEST")"
+replacement="$(jq --compact-output '.[0] | {serialNumber, customerId, orderId, startDate, endDate, status: "CONFIRMED"}' <<<"$response")"
 updated="$(curl --fail --silent --show-error --max-time 5 --request PUT --header 'Content-Type: application/json' --data "$replacement" "${BASE_URL}/api/v1/reservations/${RESERVATION_ID}")"
 jq --exit-status --arg id "$RESERVATION_ID" '.id == $id and .status == "CONFIRMED"' <<<"$updated" >/dev/null
 EXPECTED_RESPONSE="$(jq --compact-output --sort-keys . <<<"$updated")"

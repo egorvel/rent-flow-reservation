@@ -24,10 +24,23 @@
         <archunit.version>1.4.2</archunit.version>
         <maven-enforcer-plugin.version>3.6.2</maven-enforcer-plugin.version>
         <palantir-java-format.version>2.96.0</palantir-java-format.version>
+        <resilience4j.version>2.4.0</resilience4j.version>
         <springdoc.version>3.0.3</springdoc.version>
         <spotless-maven-plugin.version>3.8.0</spotless-maven-plugin.version>
         <testcontainers.version>2.0.5</testcontainers.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.github.resilience4j</groupId>
+                <artifactId>resilience4j-bom</artifactId>
+                <version>${resilience4j.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <dependency>
@@ -49,6 +62,23 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot4</artifactId>
+            <version>${resilience4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-circuitbreaker</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-retry</artifactId>
         </dependency>
 
         <dependency>

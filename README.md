@@ -1,10 +1,9 @@
 # RentFlow Reservation Service
 
-Basic reservation CRUD with a versioned REST API, executable Swagger documentation, Flyway
-migrations, PostgreSQL persistence, health probes, container packaging, and automated verification.
-The service owns time-based availability and temporary holds; this initial scaffold only records
-reservations. Creation always assigns `HELD`. Availability, overlap, external existence checks,
-hold expiry, and status-transition rules will be added separately.
+Reservation CRUD with atomic, idempotent batch creation, executable Swagger documentation, Flyway
+migrations, PostgreSQL persistence, Inventory integration, health probes, container packaging, and
+automated verification. Creation assigns `HELD`, rejects a second active reservation for an item,
+and atomically claims every item as `RESERVED` through Inventory.
 
 The implementation follows the sibling Pricing service's MVC layers, DTO/converter pattern,
 Problem Details errors, page envelope, build checks, and schema ownership conventions.
@@ -31,9 +30,10 @@ Swagger UI: <http://localhost:8081/swagger-ui.html>
 OpenAPI: <http://localhost:8081/v3/api-docs>
 API: <http://localhost:8081/api/v1/reservations>
 
-The standalone development stack runs PostgreSQL on `127.0.0.1:5433` and the application on
-`127.0.0.1:8081`, leaving Pricing's default ports available. PostgreSQL stores data in the named
-`rentflow-postgres-data` volume mounted at `/var/lib/postgresql` for PostgreSQL 18.
+The standalone development stack runs PostgreSQL on `127.0.0.1:5433`, the application on
+`127.0.0.1:8081`, and an internal deterministic Inventory stub for local creation requests.
+PostgreSQL stores data in the named `rentflow-postgres-data` volume mounted at
+`/var/lib/postgresql` for PostgreSQL 18. Use `INVENTORY_BASE_URL` when running against Inventory.
 
 ```bash
 docker compose stop
@@ -117,15 +117,15 @@ The API is unauthenticated in this increment and accepts JSON. It returns a gene
 client-assigned `serialNumber`, `customerId`, `orderId`, inclusive `startDate`/`endDate`, immutable
 UTC creation `timestamp` (microsecond precision), and `status`.
 
-Serial numbers follow `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. Customer/order IDs are case-sensitive,
-nonblank strings up to 64 characters. Dates use `YYYY-MM-DD`, years 0001–9999, with
-`endDate >= startDate`. Same-day and historical periods are accepted. Identifiers are not trimmed
-or normalized. Repeated serial/customer IDs and overlapping periods are accepted without lookup
-or uniqueness constraints. Multiple reservations may share an order ID.
+Customer/order IDs are case-sensitive, nonblank strings up to 64 characters. Creation delegates
+serial-number validity and existence to Inventory. Dates use `YYYY-MM-DD`, years 0001–9999, with
+`endDate >= startDate`; same-day periods are accepted and new intents must start on or after the
+current PostgreSQL UTC date. An item has an active local reservation when a `HELD` or `CONFIRMED`
+row ends today or later. Outdated and `CANCELLED` rows do not block creation.
 
 | Operation | Path | Success |
 | --- | --- | --- |
-| POST | /api/v1/reservations | 201 with Location and HELD reservation |
+| POST | /api/v1/reservations | 201 with an ordered HELD reservation array |
 | GET | /api/v1/reservations/{id} | 200 reservation |
 | GET | /api/v1/reservations | 200 bounded page |
 | PUT | /api/v1/reservations/{id} | 200 full replacement |
@@ -133,8 +133,10 @@ or uniqueness constraints. Multiple reservations may share an order ID.
 
 PUT requires all five client-assigned detail fields plus `status` (`HELD`, `CONFIRMED`, or
 `CANCELLED`). It preserves ID/timestamp and never inserts a missing reservation. There are no
-status-transition restrictions yet. POST accepts neither status nor ID/timestamp. Unknown
-properties are rejected. Missing item GET/PUT/DELETE returns 404. PATCH is unsupported.
+status-transition restrictions yet. POST requires a canonical UUID-v4 `Idempotency-Key` and an
+envelope containing common `customerId`/`orderId` plus 1–100 unique item serials and periods. It
+returns no `Location` header. Unknown properties are rejected. Missing item GET/PUT/DELETE returns
+404. PATCH is unsupported.
 
 Errors use `application/problem+json` with `type`, `title`, `status`, `detail`, `instance`, and
 machine-readable `code`; validation errors add `violations` sorted by field and message.
@@ -143,16 +145,24 @@ request media 415, and unexpected failures a sanitized 500. Swagger describes sc
 
 ## Try every operation
 
-These examples use the local stack and `jq` to capture the generated ID:
+These examples use the local stack and `jq` to capture the first generated ID:
 
 ```bash
 BASE_URL=http://localhost:8081
+IDEMPOTENCY_KEY=$(cat /proc/sys/kernel/random/uuid)
 CREATED=$(curl --fail-with-body --silent --show-error \
   --request POST --header 'Content-Type: application/json' \
-  --data '{"serialNumber":"DRILL-001","customerId":"CUSTOMER-001","orderId":"ORDER-001","startDate":"2026-10-01","endDate":"2026-10-03"}' \
+  --header "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  --data '{"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[{"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"}]}' \
   "$BASE_URL/api/v1/reservations")
-RESERVATION_ID=$(printf '%s' "$CREATED" | jq -er '.id')
+RESERVATION_ID=$(printf '%s' "$CREATED" | jq -er '.[0].id')
 printf '%s\n' "$CREATED"
+
+# The same key and body replays the identical terminal result.
+curl --fail-with-body --request POST --header 'Content-Type: application/json' \
+  --header "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  --data '{"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[{"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"}]}' \
+  "$BASE_URL/api/v1/reservations"
 
 curl --fail-with-body "$BASE_URL/api/v1/reservations/$RESERVATION_ID"
 
@@ -172,9 +182,21 @@ Defaults are page 0, size 20, sort `id`, direction `asc`. Size is 1–100. Any r
 be the primary sort; ties use `id ASC`. Direction is case-insensitive. Unknown, repeated, blank,
 invalid query parameters and offsets above 2147483647 are rejected. Filtering is deferred.
 
+Creation persists its intent before calling Inventory and forwards the same idempotency key to
+`PATCH /api/v1/inventory/status`. Configure Inventory with `INVENTORY_BASE_URL` (default
+`http://inventory`); connect/read timeouts are 500/1500 ms. Resource failures and Inventory
+502/503/504 responses receive one 500 ms jittered retry behind the shared `inventory` circuit
+breaker. Pending work recovers every 30 seconds with database leases. Automatic calls stop after
+seven days and require manual reconciliation; completed results remain replayable for seven days.
+Retry `409 IDEMPOTENCY_IN_PROGRESS` after `Retry-After`, and retry temporary `503` responses with
+the same key. Treat reconciliation `502`/`503` responses as indeterminate until Reservation and
+Inventory state have been compared. Metrics use the `reservation.creation.*` prefix and bounded
+outcome tags. Deploy this contract together with Inventory's idempotent status-transition endpoint.
+
 ## Migrations and health
 
-V1 creates `reservation.reservations`; Flyway history lives in `reservation.flyway_schema_history`.
+V1 creates `reservation.reservations`; V2 adds the durable creation workflow and active lookup
+index. Flyway history lives in `reservation.flyway_schema_history`.
 Hibernate validates mappings and never generates DDL. Flyway cannot create schemas and is the
 sole mechanism for evolving Reservation-owned application objects after platform provisioning.
 Add migrations at `src/main/resources/db/migration/V{n}__description.sql` or

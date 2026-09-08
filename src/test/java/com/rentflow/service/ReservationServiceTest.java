@@ -29,15 +29,6 @@ class ReservationServiceTest {
     private ReservationRepository repository;
 
     @Test
-    void creationOnlyPersistsWithoutExistenceLookups() {
-        Reservation reservation = reservation();
-        when(repository.saveAndFlush(reservation)).thenReturn(reservation);
-        assertThat(new ReservationService(repository).create(reservation)).isSameAs(reservation);
-        verify(repository).saveAndFlush(reservation);
-        verifyNoMoreInteractions(repository);
-    }
-
-    @Test
     void missingOperationsNeverMutate() {
         UUID id = UUID.randomUUID();
         when(repository.findById(id)).thenReturn(Optional.empty());

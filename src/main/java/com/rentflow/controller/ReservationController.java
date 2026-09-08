@@ -1,7 +1,7 @@
 package com.rentflow.controller;
 
-import java.net.URI;
 import java.time.LocalDate;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -26,14 +26,19 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.rentflow.converter.ReservationConverter;
-import com.rentflow.dto.CreateReservationRequest;
+import com.rentflow.dto.CreateReservationsRequest;
 import com.rentflow.dto.ProblemResponse;
+import com.rentflow.dto.ReservationCreationProblemResponse;
 import com.rentflow.dto.ReservationDTO;
+import com.rentflow.service.IdempotencyKeyParser;
+import com.rentflow.service.ReservationCreationHttpResponse;
+import com.rentflow.service.ReservationCreationService;
 import com.rentflow.service.ReservationService;
 import com.rentflow.service.ReservationSortField;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.enums.ParameterIn;
 import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.ExampleObject;
@@ -77,33 +82,64 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 })
 public class ReservationController {
     public static final String PATH = "/api/v1/reservations";
+    private static final String IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS";
     private static final Set<String> COLLECTION_PARAMETERS = Set.of("page", "size", "sort", "direction");
     private final ReservationService service;
+    private final ReservationCreationService creationService;
     private final ReservationConverter converter;
 
-    public ReservationController(ReservationService service, ReservationConverter converter) {
+    public ReservationController(
+            ReservationService service, ReservationCreationService creationService, ReservationConverter converter) {
         this.service = service;
+        this.creationService = creationService;
         this.converter = converter;
     }
 
     @Operation(
             operationId = "createReservation",
-            summary = "Create a HELD reservation",
+            summary = "Create an atomic batch of HELD reservations",
             description =
-                    "No uniqueness, availability, or external existence checks. The inclusive period may be historical or a single day.")
+                    "Each item must start on or after the PostgreSQL UTC date. Matching idempotency retries replay the original result.",
+            parameters =
+                    @Parameter(
+                            name = "Idempotency-Key",
+                            in = ParameterIn.HEADER,
+                            required = true,
+                            description = "Endpoint-global canonical UUID v4 used for retry and replay.",
+                            schema =
+                                    @Schema(
+                                            type = "string",
+                                            format = "uuid",
+                                            pattern = IdempotencyKeyParser.UUID_V4_PATTERN)))
     @ApiResponses({
         @ApiResponse(
                 responseCode = "201",
-                description = "Reservation created with HELD status.",
-                headers =
-                        @Header(
-                                name = HttpHeaders.LOCATION,
-                                description = "Canonical relative reservation path.",
-                                schema = @Schema(type = "string", format = "uri-reference")),
+                description = "Every requested Reservation was created with HELD status.",
+                headers = {
+                    @Header(name = "Idempotency-Replayed", schema = @Schema(type = "boolean")),
+                    @Header(name = "Idempotency-Key-Expires-At", schema = @Schema(format = "date-time"))
+                },
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                                schema = @Schema(implementation = ReservationDTO.class))),
+                                array =
+                                        @io.swagger.v3.oas.annotations.media.ArraySchema(
+                                                schema = @Schema(implementation = ReservationDTO.class)))),
+        @ApiResponse(
+                responseCode = "409",
+                description = "An active reservation, unavailable Inventory item, or busy key prevented creation.",
+                headers =
+                        @Header(
+                                name = "Retry-After",
+                                description = "One second for IDEMPOTENCY_IN_PROGRESS only.",
+                                schema = @Schema(type = "integer")),
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ReservationCreationProblemResponse.class))),
+        @ApiResponse(responseCode = "422", description = "An Inventory item is missing or the key was reused."),
+        @ApiResponse(responseCode = "502", description = "Inventory returned an ambiguous response."),
+        @ApiResponse(responseCode = "503", description = "Inventory is unavailable or reconciliation is required."),
         @ApiResponse(
                 responseCode = "415",
                 description = "Unsupported request media type.",
@@ -113,10 +149,30 @@ public class ReservationController {
                                 schema = @Schema(implementation = ProblemResponse.class)))
     })
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<ReservationDTO> create(@Valid @RequestBody CreateReservationRequest request) {
-        validatePeriod(request.startDate(), request.endDate());
-        ReservationDTO response = converter.toResponse(service.create(converter.toModel(request)));
-        return ResponseEntity.created(URI.create(PATH + "/" + response.id())).body(response);
+    public ResponseEntity<?> create(
+            HttpServletRequest servletRequest, @Valid @RequestBody CreateReservationsRequest request) {
+        UUID idempotencyKey;
+        try {
+            idempotencyKey = IdempotencyKeyParser.parse(Collections.list(servletRequest.getHeaders("Idempotency-Key")));
+        } catch (IllegalArgumentException exception) {
+            throw new RequestValidationException("Idempotency-Key", "must contain exactly one canonical UUID v4 value");
+        }
+        ReservationCreationHttpResponse result = creationService.create(idempotencyKey, converter.toCommand(request));
+        return creationResponse(result);
+    }
+
+    private ResponseEntity<?> creationResponse(ReservationCreationHttpResponse result) {
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(result.status());
+        if (result.expiresAt() != null) {
+            response.header("Idempotency-Replayed", Boolean.toString(result.replayed()));
+            response.header("Idempotency-Key-Expires-At", result.expiresAt().toString());
+        }
+        if (IDEMPOTENCY_IN_PROGRESS.equals(result.code())) {
+            response.header(HttpHeaders.RETRY_AFTER, "1");
+        }
+        MediaType contentType =
+                result.status() == 201 ? MediaType.APPLICATION_JSON : MediaType.APPLICATION_PROBLEM_JSON;
+        return response.contentType(contentType).body(result.body());
     }
 
     @Operation(operationId = "getReservation", summary = "Retrieve a reservation")

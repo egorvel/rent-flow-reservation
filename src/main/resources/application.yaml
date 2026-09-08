@@ -24,6 +24,12 @@ spring:
   sql:
     init:
       mode: never
+  http:
+    serviceclient:
+      inventory:
+        base-url: ${INVENTORY_BASE_URL:http://inventory}
+        connect-timeout: 500ms
+        read-timeout: 1500ms
 
 springdoc:
   paths-to-match: /api/v1/**
@@ -44,3 +50,41 @@ management:
         readiness:
           include: readinessState,db
       show-details: never
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventory:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        record-exceptions:
+          - org.springframework.web.client.ResourceAccessException
+          - org.springframework.web.client.HttpServerErrorException
+        ignore-exceptions:
+          - org.springframework.web.client.HttpClientErrorException
+          - com.rentflow.service.rest.UnexpectedInventoryResponseException
+  retry:
+    instances:
+      inventory:
+        max-attempts: 2
+        wait-duration: 500ms
+        enable-randomized-wait: true
+        randomized-wait-factor: 0.2
+        retry-exception-predicate: com.rentflow.service.rest.InventoryRetryableExceptionPredicate
+
+reservation:
+  creation:
+    lease-duration: 30s
+    recovery:
+      fixed-delay: 30s
+      batch-size: 100
+      initial-backoff: 30s
+      max-backoff: 30m
+      jitter-factor: 0.2
+    cleanup:
+      cron: "0 0 3 * * *"
+      runtime-budget: 60s

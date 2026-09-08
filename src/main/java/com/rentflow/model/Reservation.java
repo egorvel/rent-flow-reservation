@@ -2,7 +2,6 @@ package com.rentflow.model;
 
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.UUID;
 import jakarta.persistence.Column;
@@ -14,6 +13,9 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+
+import org.hibernate.annotations.Generated;
+import org.hibernate.generator.EventType;
 
 @Entity
 @Table(name = "reservations", schema = "reservation")
@@ -38,7 +40,8 @@ public class Reservation {
     @Column(name = "end_date", nullable = false)
     private LocalDate endDate;
 
-    @Column(name = "created_at", nullable = false, updatable = false)
+    @Generated(event = EventType.INSERT)
+    @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     private Instant timestamp;
 
     @Enumerated(EnumType.STRING)
@@ -58,7 +61,6 @@ public class Reservation {
     @PrePersist
     void initializeCreation() {
         status = ReservationStatus.HELD;
-        timestamp = Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
 
     public UUID getId() {
