@@ -22,8 +22,8 @@ import com.rentflow.dto.CreateReservationItemRequest;
 import com.rentflow.dto.CreateReservationsRequest;
 import com.rentflow.dto.ProblemResponse;
 import com.rentflow.dto.ReservationDTO;
-import com.rentflow.model.InventoryClaimResult;
 import com.rentflow.service.InventoryGateway;
+import com.rentflow.service.InventoryGateway.ClaimResult;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import tools.jackson.databind.JsonNode;
@@ -63,7 +63,7 @@ class OpenApiIT extends PostgresIntegrationTest {
 
     @BeforeEach
     void readDocument() throws Exception {
-        when(inventoryGateway.claim(any(), any())).thenReturn(InventoryClaimResult.claimed());
+        when(inventoryGateway.claim(any(), any())).thenReturn(ClaimResult.claimed());
         document = mapper.readTree(mvc.perform(get("/v3/api-docs"))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))

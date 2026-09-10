@@ -6,6 +6,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -17,24 +22,31 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.context.ApplicationContext;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
-import com.rentflow.model.InventoryClaimResult;
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCreationFailure;
 import com.rentflow.model.ReservationStatus;
 import com.rentflow.repository.ReservationCreationRequestRepository;
 import com.rentflow.repository.ReservationRepository;
 import com.rentflow.service.InventoryGateway;
+import com.rentflow.service.InventoryGateway.ClaimResult;
+import com.rentflow.service.InventoryProtocolException;
 import com.rentflow.service.InventoryServiceUnavailableException;
-import com.rentflow.service.ReservationCreationStoreService;
+import com.rentflow.service.ReservationCreationCleanupService;
 import com.rentflow.support.PostgresIntegrationTest;
 
+import io.github.resilience4j.core.functions.Either;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.retry.RetryRegistry;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -75,20 +87,29 @@ class ReservationIT extends PostgresIntegrationTest {
     private ReservationRepository repository;
 
     @Autowired
-    private ReservationCreationRequestRepository workflowRepository;
+    private ReservationCreationRequestRepository creationRequestRepository;
 
     @Autowired
-    private ReservationCreationStoreService creationStore;
+    private ApplicationContext applicationContext;
+
+    @Autowired
+    private RetryRegistry retryRegistry;
+
+    @Autowired
+    private JdbcTemplate jdbc;
+
+    @Autowired
+    private ReservationCreationCleanupService creationCleanup;
 
     @MockitoBean
     private InventoryGateway inventoryGateway;
 
     @BeforeEach
     void clearReservations() {
-        workflowRepository.deleteAllInBatch();
+        creationRequestRepository.deleteAllInBatch();
         repository.deleteAllInBatch();
         reset(inventoryGateway);
-        when(inventoryGateway.claim(any(), any())).thenReturn(InventoryClaimResult.claimed());
+        when(inventoryGateway.claim(any(), any())).thenReturn(ClaimResult.claimed());
     }
 
     @Test
@@ -107,16 +128,29 @@ class ReservationIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void rejectsAnotherActiveReservationForTheSameSerial() throws Exception {
+    void storesAndReplaysAnActiveReservationConflict() throws Exception {
         create(CREATE);
+        UUID key = UUID.randomUUID();
         mvc.perform(post(PATH)
-                        .header("Idempotency-Key", UUID.randomUUID())
+                        .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(batch(CREATE)))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("ACTIVE_RESERVATION_EXISTS"))
-                .andExpect(jsonPath("$.failedItems[0].index").value(0));
+                .andExpect(jsonPath("$.failedItems[0].index").value(0))
+                .andExpect(header().string("Idempotency-Replayed", "false"));
+        Reservation existing = repository.findAll().getFirst();
+        existing.changeStatus(ReservationStatus.CANCELLED);
+        repository.saveAndFlush(existing);
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(batch(CREATE)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("ACTIVE_RESERVATION_EXISTS"))
+                .andExpect(header().string("Idempotency-Replayed", "true"));
         assertThat(repository.count()).isEqualTo(1);
+        verify(inventoryGateway, times(1)).claim(any(), any());
     }
 
     @Test
@@ -131,28 +165,98 @@ class ReservationIT extends PostgresIntegrationTest {
         assertThat(repository.count()).isEqualTo(2);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"HELD", "CONFIRMED"})
+    void treatsAnActiveReservationEndingTodayAsAConflict(String reservationStatus) throws Exception {
+        LocalDate today = creationRequestRepository.databaseUtcDate();
+        Reservation existing = new Reservation("DRILL-001", "old-customer", "old-order", today.minusDays(2), today);
+        existing.changeStatus(ReservationStatus.valueOf(reservationStatus));
+        repository.saveAndFlush(existing);
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(batchFor("DRILL-001", today.plusDays(1), today.plusDays(2))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("ACTIVE_RESERVATION_EXISTS"));
+
+        verify(inventoryGateway, times(0)).claim(any(), any());
+    }
+
+    @Test
+    void allowsACancelledFutureReservationAndKeepsSerialsCaseSensitive() throws Exception {
+        LocalDate today = creationRequestRepository.databaseUtcDate();
+        Reservation cancelled =
+                new Reservation("DRILL-001", "old-customer", "old-order", today.plusDays(2), today.plusDays(3));
+        cancelled.changeStatus(ReservationStatus.CANCELLED);
+        repository.saveAndFlush(cancelled);
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(batchFor("drill-001", today.plusDays(1), today.plusDays(2))))
+                .andExpect(status().isCreated());
+
+        assertThat(repository.count()).isEqualTo(2);
+        verify(inventoryGateway).claim(any(), org.mockito.ArgumentMatchers.eq(List.of("drill-001")));
+    }
+
+    @Test
+    void reportsAllLocalConflictsInRequestOrder() throws Exception {
+        LocalDate today = creationRequestRepository.databaseUtcDate();
+        repository.saveAllAndFlush(List.of(
+                new Reservation("SAW-001", "old-customer", "old-order", today, today.plusDays(2)),
+                new Reservation("DRILL-001", "old-customer", "old-order", today, today.plusDays(2))));
+        String body = """
+                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                  {"serialNumber":"SAW-001","startDate":"%s","endDate":"%s"},
+                  {"serialNumber":"MIXER-001","startDate":"%s","endDate":"%s"},
+                  {"serialNumber":"DRILL-001","startDate":"%s","endDate":"%s"}
+                ]}
+                """.formatted(
+                        today.plusDays(1),
+                        today.plusDays(2),
+                        today.plusDays(1),
+                        today.plusDays(2),
+                        today.plusDays(1),
+                        today.plusDays(2));
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.failedItems", hasSize(2)))
+                .andExpect(jsonPath("$.failedItems[0].index").value(0))
+                .andExpect(jsonPath("$.failedItems[0].serialNumber").value("SAW-001"))
+                .andExpect(jsonPath("$.failedItems[1].index").value(2))
+                .andExpect(jsonPath("$.failedItems[1].serialNumber").value("DRILL-001"));
+
+        verify(inventoryGateway, times(0)).claim(any(), any());
+    }
+
     @Test
     void replaysACompletedBatchWithoutCallingInventoryAgain() throws Exception {
         UUID key = UUID.randomUUID();
         String body = batch(CREATE);
-        byte[] first = mvc.perform(post(PATH)
+        MvcResult firstResult = mvc.perform(post(PATH)
                         .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isCreated())
                 .andExpect(header().string("Idempotency-Replayed", "false"))
-                .andReturn()
-                .getResponse()
-                .getContentAsByteArray();
-        byte[] replay = mvc.perform(post(PATH)
+                .andReturn();
+        byte[] first = firstResult.getResponse().getContentAsByteArray();
+        String firstExpiry = firstResult.getResponse().getHeader("Idempotency-Key-Expires-At");
+        MvcResult replayResult = mvc.perform(post(PATH)
                         .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isCreated())
                 .andExpect(header().string("Idempotency-Replayed", "true"))
-                .andReturn()
-                .getResponse()
-                .getContentAsByteArray();
+                .andExpect(header().string("Idempotency-Key-Expires-At", firstExpiry))
+                .andReturn();
+        byte[] replay = replayResult.getResponse().getContentAsByteArray();
 
         assertThat(replay).isEqualTo(first);
         assertThat(repository.count()).isOne();
@@ -162,8 +266,8 @@ class ReservationIT extends PostgresIntegrationTest {
     @Test
     void rollsBackTheWholeBatchWhenInventoryRejectsOneItem() throws Exception {
         when(inventoryGateway.claim(any(), any()))
-                .thenReturn(InventoryClaimResult.terminal(
-                        InventoryClaimResult.Type.UNAVAILABLE,
+                .thenReturn(ClaimResult.terminal(
+                        ClaimResult.Type.UNAVAILABLE,
                         List.of(new ReservationCreationFailure(
                                 1, "MIXER-001", "INVENTORY_ITEM_UNAVAILABLE", "Inventory item is not available."))));
         String body = """
@@ -183,13 +287,48 @@ class ReservationIT extends PostgresIntegrationTest {
         assertThat(repository.count()).isZero();
     }
 
+    @ParameterizedTest
+    @CsvSource({
+        "MISSING,422,INVENTORY_ITEM_NOT_FOUND",
+        "INVALID_REFERENCE,400,INVALID_INVENTORY_REFERENCE",
+        "KEY_REUSED,422,IDEMPOTENCY_KEY_REUSED"
+    })
+    void storesAndReplaysOtherTerminalInventoryFailures(String type, int statusCode, String code) throws Exception {
+        UUID key = UUID.randomUUID();
+        ClaimResult.Type resultType = ClaimResult.Type.valueOf(type);
+        List<ReservationCreationFailure> failures = resultType == ClaimResult.Type.KEY_REUSED
+                ? List.of()
+                : List.of(new ReservationCreationFailure(
+                        0,
+                        "DRILL-001",
+                        resultType == ClaimResult.Type.MISSING
+                                ? "INVENTORY_ITEM_NOT_FOUND"
+                                : "INVALID_INVENTORY_REFERENCE",
+                        "Safe failure."));
+        when(inventoryGateway.claim(any(), any())).thenReturn(ClaimResult.terminal(resultType, failures));
+
+        for (int request = 0; request < 2; request++) {
+            mvc.perform(post(PATH)
+                            .header("Idempotency-Key", key)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(batch(CREATE)))
+                    .andExpect(status().is(statusCode))
+                    .andExpect(jsonPath("$.code").value(code))
+                    .andExpect(header().string("Idempotency-Replayed", request == 0 ? "false" : "true"));
+        }
+
+        assertThat(repository.count()).isZero();
+        assertThat(creationRequestRepository.count()).isOne();
+        verify(inventoryGateway).claim(org.mockito.ArgumentMatchers.eq(key), any());
+    }
+
     @Test
     void resumesTemporaryInventoryFailureWithTheSameKey() throws Exception {
         UUID key = UUID.randomUUID();
         String body = batch(CREATE);
         when(inventoryGateway.claim(any(), any()))
                 .thenThrow(new InventoryServiceUnavailableException(new IllegalStateException()))
-                .thenReturn(InventoryClaimResult.claimed());
+                .thenReturn(ClaimResult.claimed());
 
         mvc.perform(post(PATH)
                         .header("Idempotency-Key", key)
@@ -198,6 +337,7 @@ class ReservationIT extends PostgresIntegrationTest {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.code").value("INVENTORY_SERVICE_UNAVAILABLE"));
         assertThat(repository.count()).isZero();
+        assertThat(creationRequestRepository.count()).isZero();
 
         mvc.perform(post(PATH)
                         .header("Idempotency-Key", key)
@@ -209,8 +349,85 @@ class ReservationIT extends PostgresIntegrationTest {
     }
 
     @Test
+    void treatsAnExpiredKeyAsANewIntent() throws Exception {
+        UUID key = UUID.randomUUID();
+        String body = batch(CREATE);
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated());
+        Reservation existing = repository.findAll().getFirst();
+        existing.changeStatus(ReservationStatus.CANCELLED);
+        repository.saveAndFlush(existing);
+        jdbc.update("""
+                UPDATE reservation.reservation_creation_requests
+                SET recorded_at = statement_timestamp() - INTERVAL '169 hours',
+                    expires_at = statement_timestamp() - INTERVAL '1 hour'
+                WHERE idempotency_key = ?
+                """, key);
+
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("DRILL-001", "SAW-001")))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Idempotency-Replayed", "false"));
+
+        assertThat(repository.count()).isEqualTo(2);
+        assertThat(creationRequestRepository.count()).isOne();
+        verify(inventoryGateway, times(2)).claim(org.mockito.ArgumentMatchers.eq(key), any());
+    }
+
+    @Test
+    void retriesProtocolAmbiguityOnlyWhenTheClientRetries() throws Exception {
+        UUID key = UUID.randomUUID();
+        String body = batch(CREATE);
+        when(inventoryGateway.claim(any(), any()))
+                .thenThrow(new InventoryProtocolException(new IllegalStateException()));
+
+        for (int request = 0; request < 2; request++) {
+            mvc.perform(post(PATH)
+                            .header("Idempotency-Key", key)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isBadGateway())
+                    .andExpect(jsonPath("$.code").value("INVENTORY_SERVICE_ERROR"));
+        }
+
+        assertThat(repository.count()).isZero();
+        assertThat(creationRequestRepository.count()).isZero();
+        verify(inventoryGateway, times(2)).claim(org.mockito.ArgumentMatchers.eq(key), any());
+    }
+
+    @Test
+    void replaysAStoredInventoryRejectionAfterConditionsChange() throws Exception {
+        UUID key = UUID.randomUUID();
+        String body = batch(CREATE);
+        when(inventoryGateway.claim(any(), any()))
+                .thenReturn(ClaimResult.terminal(
+                        ClaimResult.Type.UNAVAILABLE,
+                        List.of(new ReservationCreationFailure(
+                                0, "DRILL-001", "INVENTORY_ITEM_UNAVAILABLE", "Inventory item is not available."))));
+
+        for (int request = 0; request < 2; request++) {
+            mvc.perform(post(PATH)
+                            .header("Idempotency-Key", key)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.code").value("INVENTORY_ITEM_UNAVAILABLE"))
+                    .andExpect(header().string("Idempotency-Replayed", request == 0 ? "false" : "true"));
+        }
+
+        assertThat(repository.count()).isZero();
+        assertThat(creationRequestRepository.count()).isOne();
+        verify(inventoryGateway, times(1)).claim(org.mockito.ArgumentMatchers.eq(key), any());
+    }
+
+    @Test
     void returnsFixedRetryHeaderWhenInventoryIsBusy() throws Exception {
-        when(inventoryGateway.claim(any(), any())).thenReturn(InventoryClaimResult.busy());
+        when(inventoryGateway.claim(any(), any())).thenReturn(ClaimResult.busy());
 
         mvc.perform(post(PATH)
                         .header("Idempotency-Key", UUID.randomUUID())
@@ -221,21 +438,94 @@ class ReservationIT extends PostgresIntegrationTest {
                 .andExpect(jsonPath("$.code").value("IDEMPOTENCY_IN_PROGRESS"));
 
         assertThat(repository.count()).isZero();
+        assertThat(creationRequestRepository.count()).isZero();
     }
 
     @Test
-    void recoveryCannotClaimARequestBeforeItsNextAttempt() throws Exception {
+    void returnsBusyImmediatelyForAConcurrentRequestWithTheSameKey() throws Exception {
         UUID key = UUID.randomUUID();
-        when(inventoryGateway.claim(any(), any()))
-                .thenThrow(new InventoryServiceUnavailableException(new IllegalStateException()));
+        String body = batch(CREATE);
+        CountDownLatch inventoryEntered = new CountDownLatch(1);
+        CountDownLatch allowInventoryResponse = new CountDownLatch(1);
+        when(inventoryGateway.claim(any(), any())).thenAnswer(invocation -> {
+            inventoryEntered.countDown();
+            assertThat(allowInventoryResponse.await(5, TimeUnit.SECONDS)).isTrue();
+            return ClaimResult.claimed();
+        });
 
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<Integer> first = executor.submit(() -> mvc.perform(post(PATH)
+                            .header("Idempotency-Key", key)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andReturn()
+                    .getResponse()
+                    .getStatus());
+            assertThat(inventoryEntered.await(5, TimeUnit.SECONDS)).isTrue();
+
+            mvc.perform(post(PATH)
+                            .header("Idempotency-Key", key)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isConflict())
+                    .andExpect(header().string("Retry-After", "1"))
+                    .andExpect(jsonPath("$.code").value("IDEMPOTENCY_IN_PROGRESS"));
+
+            allowInventoryResponse.countDown();
+            assertThat(first.get(5, TimeUnit.SECONDS)).isEqualTo(201);
+        }
+
+        assertThat(repository.count()).isOne();
+        assertThat(creationRequestRepository.count()).isOne();
+        verify(inventoryGateway).claim(org.mockito.ArgumentMatchers.eq(key), any());
+    }
+
+    @Test
+    void hasNoAutomaticReservationCreationRecoveryOrWorkflowBean() {
+        assertThat(applicationContext.getBeanDefinitionNames()).noneMatch(name -> {
+            String lower = name.toLowerCase(java.util.Locale.ROOT);
+            return lower.contains("reservationcreationrecovery") || lower.contains("reservationcreationstore");
+        });
+    }
+
+    @Test
+    void configuresFiveExponentialJitteredForegroundAttempts() {
+        RetryConfig retryConfig = retryRegistry.retry("inventory").getRetryConfig();
+        assertThat(retryConfig.getMaxAttempts()).isEqualTo(5);
+        long[] minimums = {160, 320, 640, 1280};
+        long[] maximums = {240, 480, 960, 1920};
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            long wait = retryConfig.getIntervalBiFunction().apply(attempt, Either.left(new IllegalStateException()));
+            assertThat(wait).isBetween(minimums[attempt - 1], maximums[attempt - 1]);
+        }
+    }
+
+    @Test
+    void cleanupDeletesOnlyExpiredLedgerRows() throws Exception {
+        UUID expiredKey = UUID.randomUUID();
+        UUID retainedKey = UUID.randomUUID();
         mvc.perform(post(PATH)
-                        .header("Idempotency-Key", key)
+                        .header("Idempotency-Key", expiredKey)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(batch(CREATE)))
-                .andExpect(status().isServiceUnavailable());
+                .andExpect(status().isCreated());
+        mvc.perform(post(PATH)
+                        .header("Idempotency-Key", retainedKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(batch(CREATE.replace("DRILL-001", "SAW-001"))))
+                .andExpect(status().isCreated());
+        jdbc.update("""
+                UPDATE reservation.reservation_creation_requests
+                SET recorded_at = statement_timestamp() - INTERVAL '169 hours',
+                    expires_at = statement_timestamp() - INTERVAL '1 hour'
+                WHERE idempotency_key = ?
+                """, expiredKey);
 
-        assertThat(creationStore.claimForRecovery(key, UUID.randomUUID())).isEmpty();
+        assertThat(creationCleanup.deleteChunk()).isOne();
+
+        assertThat(creationRequestRepository.findById(expiredKey)).isEmpty();
+        assertThat(creationRequestRepository.findById(retainedKey)).isPresent();
+        assertThat(repository.count()).isEqualTo(2);
     }
 
     @Test
@@ -259,7 +549,7 @@ class ReservationIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void rejectsMissingKeyAndDuplicateSerialsBeforeWorkflowOrInventory() throws Exception {
+    void rejectsMissingKeyAndReplaysStoredDuplicateSerialValidation() throws Exception {
         String duplicate = """
                 {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
                   {"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"},
@@ -269,14 +559,18 @@ class ReservationIT extends PostgresIntegrationTest {
         mvc.perform(post(PATH).contentType(MediaType.APPLICATION_JSON).content(batch(CREATE)))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.violations[0].field").value("Idempotency-Key"));
-        mvc.perform(post(PATH)
-                        .header("Idempotency-Key", UUID.randomUUID())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(duplicate))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.violations[0].field").value("items[1].serialNumber"));
+        UUID key = UUID.randomUUID();
+        for (int request = 0; request < 2; request++) {
+            mvc.perform(post(PATH)
+                            .header("Idempotency-Key", key)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(duplicate))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.violations[0].field").value("items[1].serialNumber"))
+                    .andExpect(header().string("Idempotency-Replayed", request == 0 ? "false" : "true"));
+        }
 
-        assertThat(workflowRepository.count()).isZero();
+        assertThat(creationRequestRepository.count()).isOne();
         assertThat(repository.count()).isZero();
         verify(inventoryGateway, times(0)).claim(any(), any());
     }
@@ -627,6 +921,14 @@ class ReservationIT extends PostgresIntegrationTest {
                         item.path("serialNumber").asString(),
                         item.path("startDate").asString(),
                         item.path("endDate").asString());
+    }
+
+    private String batchFor(String serialNumber, LocalDate startDate, LocalDate endDate) {
+        return """
+                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                  {"serialNumber":"%s","startDate":"%s","endDate":"%s"}
+                ]}
+                """.formatted(serialNumber, startDate, endDate);
     }
 
     private JsonNode read(String id) throws Exception {

@@ -12,4 +12,5 @@ public record ReservationCreationProblemResponse(
         String detail,
         String instance,
         String code,
-        List<ReservationCreationFailureDTO> failedItems) {}
+        List<ReservationCreationFailureDTO> failedItems,
+        List<ViolationResponse> violations) {}

@@ -13,6 +13,6 @@ import io.swagger.v3.oas.annotations.tags.Tag;
                         title = "RentFlow Reservation API",
                         version = "v1",
                         description =
-                                "Basic reservation CRUD. Creation always assigns HELD; availability and creation workflow checks are deferred."),
+                                "Reservation CRUD with atomic, idempotent batch creation and synchronous Inventory availability claims."),
         tags = @Tag(name = "Reservations", description = "Reservation resource operations."))
 public class OpenApiConfig {}

@@ -70,21 +70,17 @@ resilience4j:
   retry:
     instances:
       inventory:
-        max-attempts: 2
-        wait-duration: 500ms
+        max-attempts: 5
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        exponential-max-wait-duration: 1600ms
         enable-randomized-wait: true
         randomized-wait-factor: 0.2
         retry-exception-predicate: com.rentflow.service.rest.InventoryRetryableExceptionPredicate
 
 reservation:
   creation:
-    lease-duration: 30s
-    recovery:
-      fixed-delay: 30s
-      batch-size: 100
-      initial-backoff: 30s
-      max-backoff: 30m
-      jitter-factor: 0.2
     cleanup:
       cron: "0 0 3 * * *"
       runtime-budget: 60s

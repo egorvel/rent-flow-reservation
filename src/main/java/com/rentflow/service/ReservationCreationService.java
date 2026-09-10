@@ -1,65 +1,180 @@
 package com.rentflow.service;
 
-import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import com.rentflow.model.InventoryClaimResult;
+import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCommandViolation;
 import com.rentflow.model.ReservationCreationCommand;
+import com.rentflow.model.ReservationCreationFailure;
 import com.rentflow.model.ReservationCreationOutcome;
-import com.rentflow.model.ReservationCreationPreparation;
-import com.rentflow.model.ReservationCreationResult;
-import com.rentflow.model.ReservationCreationState;
+import com.rentflow.model.ReservationCreationRequest;
+import com.rentflow.model.ReservationSnapshot;
+import com.rentflow.model.ReservationStatus;
+import com.rentflow.repository.ReservationCreationRequestRepository;
+import com.rentflow.repository.ReservationRepository;
+import com.rentflow.service.InventoryGateway.ClaimResult;
+
+import io.micrometer.core.instrument.MeterRegistry;
 
 @Service
 public class ReservationCreationService {
-    private static final Duration BUSY_RETRY = Duration.ofSeconds(1);
+    private static final Set<ReservationStatus> ACTIVE_STATUSES =
+            Set.of(ReservationStatus.HELD, ReservationStatus.CONFIRMED);
 
-    private final ReservationCreationStoreService store;
-    private final InventoryGateway inventoryGateway;
-    private final ReservationCreationSettings settings;
-    private final ReservationCreationMetricsService metrics;
+    private final ReservationCreationRequestRepository creationRequests;
+    private final ReservationRepository reservations;
+    private final InventoryGateway inventory;
+    private final MeterRegistry metrics;
 
     public ReservationCreationService(
-            ReservationCreationStoreService store,
-            InventoryGateway inventoryGateway,
-            ReservationCreationSettings settings,
-            ReservationCreationMetricsService metrics) {
-        this.store = store;
-        this.inventoryGateway = inventoryGateway;
-        this.settings = settings;
+            ReservationCreationRequestRepository creationRequests,
+            ReservationRepository reservations,
+            InventoryGateway inventory,
+            MeterRegistry metrics) {
+        this.creationRequests = creationRequests;
+        this.reservations = reservations;
+        this.inventory = inventory;
         this.metrics = metrics;
     }
 
-    private ReservationCreationResult start(UUID key, ReservationCreationCommand command) {
-        List<ReservationCommandViolation> violations = ReservationCreationValidation.stable(command);
-        if (!violations.isEmpty()) {
-            throw new ReservationCreationValidationException(violations);
+    @Transactional
+    public Result create(UUID key, ReservationCreationCommand command) {
+        String fingerprint = IdempotencyFingerprint.of(command);
+        if (!creationRequests.tryExecutionLock(IdempotencyFingerprint.lockId(key))) {
+            count("busy");
+            return transientResult(ReservationCreationOutcomes.busy());
         }
 
-        UUID owner = UUID.randomUUID();
-        ReservationCreationPreparation preparation =
-                store.prepare(key, IdempotencyFingerprint.of(command), command, owner);
-        return switch (preparation.type()) {
-            case REPLAY -> new ReservationCreationResult(preparation.outcome(), true, preparation.expiresAt());
-            case RECONCILIATION -> new ReservationCreationResult(preparation.outcome(), false, null);
-            case MISMATCH -> result(ReservationCreationOutcomes.keyReused());
-            case BUSY -> new ReservationCreationResult(ReservationCreationOutcomes.busy(), false, null);
-            case EXECUTE -> execute(preparation);
+        ReservationCreationRequest request =
+                creationRequests.findForUpdateByIdempotencyKey(key).orElse(null);
+        Instant databaseTime = creationRequests.databaseTime();
+        if (request != null && request.getExpiresAt().isAfter(databaseTime)) {
+            if (!request.getFingerprint().equals(fingerprint)) {
+                count("mismatch");
+                return transientResult(ReservationCreationOutcomes.keyReused());
+            }
+            count("replay");
+            return result(request.getOutcome(), request.getExpiresAt(), true);
+        }
+
+        count("attempt");
+        LocalDate currentDate = creationRequests.databaseUtcDate();
+        List<ReservationCommandViolation> violations = validate(command, currentDate);
+        if (!violations.isEmpty()) {
+            return complete(key, fingerprint, request, ReservationCreationOutcomes.validation(violations));
+        }
+
+        List<ReservationCreationFailure> conflicts = activeFailures(command, currentDate);
+        if (!conflicts.isEmpty()) {
+            return complete(key, fingerprint, request, ReservationCreationOutcomes.active(conflicts));
+        }
+
+        ClaimResult inventoryResult = inventory.claim(key, serialNumbers(command));
+        return switch (inventoryResult.type()) {
+            case CLAIMED -> completeSuccess(key, fingerprint, request, command);
+            case BUSY -> transientResult(ReservationCreationOutcomes.busy());
+            case MISSING ->
+                complete(
+                        key,
+                        fingerprint,
+                        request,
+                        ReservationCreationOutcomes.inventoryMissing(inventoryResult.failures()));
+            case UNAVAILABLE ->
+                complete(
+                        key,
+                        fingerprint,
+                        request,
+                        ReservationCreationOutcomes.inventoryUnavailable(inventoryResult.failures()));
+            case INVALID_REFERENCE ->
+                complete(
+                        key,
+                        fingerprint,
+                        request,
+                        ReservationCreationOutcomes.invalidInventoryReference(inventoryResult.failures()));
+            case KEY_REUSED -> complete(key, fingerprint, request, ReservationCreationOutcomes.keyReused());
         };
     }
 
-    public ReservationCreationHttpResponse create(UUID key, ReservationCreationCommand command) {
-        ReservationCreationResult result = start(key, command);
-        ReservationCreationOutcome outcome = result.outcome();
-        metrics.request(metricOutcome(result));
+    private List<ReservationCommandViolation> validate(ReservationCreationCommand command, LocalDate currentDate) {
+        List<ReservationCommandViolation> violations = new ArrayList<>(ReservationCreationValidation.stable(command));
+        violations.addAll(ReservationCreationValidation.againstAcceptedDate(command, currentDate));
+        return List.copyOf(violations);
+    }
+
+    private List<ReservationCreationFailure> activeFailures(ReservationCreationCommand command, LocalDate currentDate) {
+        List<Reservation> activeReservations =
+                reservations.findAllBySerialNumberInAndStatusInAndEndDateGreaterThanEqual(
+                        new LinkedHashSet<>(serialNumbers(command)), ACTIVE_STATUSES, currentDate);
+        Set<String> activeSerialNumbers = new LinkedHashSet<>();
+        for (Reservation reservation : activeReservations) {
+            activeSerialNumbers.add(reservation.getSerialNumber());
+        }
+        List<ReservationCreationFailure> failures = new ArrayList<>();
+        for (int index = 0; index < command.items().size(); index++) {
+            String serialNumber = command.items().get(index).serialNumber();
+            if (activeSerialNumbers.contains(serialNumber)) {
+                failures.add(new ReservationCreationFailure(
+                        index,
+                        serialNumber,
+                        "ACTIVE_RESERVATION_EXISTS",
+                        "An active reservation already exists for this item."));
+            }
+        }
+        return List.copyOf(failures);
+    }
+
+    private List<String> serialNumbers(ReservationCreationCommand command) {
+        return command.items().stream()
+                .map(ReservationCreationCommand.Item::serialNumber)
+                .toList();
+    }
+
+    private Result completeSuccess(
+            UUID key, String fingerprint, ReservationCreationRequest request, ReservationCreationCommand command) {
+        List<Reservation> created = command.items().stream()
+                .map(item -> new Reservation(
+                        item.serialNumber(), command.customerId(), command.orderId(), item.startDate(), item.endDate()))
+                .toList();
+        List<Reservation> saved = reservations.saveAllAndFlush(created);
+        List<ReservationSnapshot> snapshots = saved.stream()
+                .map(reservation -> new ReservationSnapshot(
+                        reservation.getId(),
+                        reservation.getSerialNumber(),
+                        reservation.getCustomerId(),
+                        reservation.getOrderId(),
+                        reservation.getStartDate(),
+                        reservation.getEndDate(),
+                        reservation.getTimestamp(),
+                        reservation.getStatus().name()))
+                .toList();
+        return complete(key, fingerprint, request, ReservationCreationOutcomes.success(snapshots));
+    }
+
+    private Result complete(
+            UUID key, String fingerprint, ReservationCreationRequest request, ReservationCreationOutcome outcome) {
+        ReservationCreationRequest completed = request == null ? new ReservationCreationRequest(key) : request;
+        completed.complete(fingerprint, outcome, creationRequests.databaseTime());
+        creationRequests.saveAndFlush(completed);
+        count("completion");
+        return result(outcome, completed.getExpiresAt(), false);
+    }
+
+    private Result transientResult(ReservationCreationOutcome outcome) {
+        return result(outcome, null, false);
+    }
+
+    private Result result(ReservationCreationOutcome outcome, Instant expiresAt, boolean replayed) {
         Object body;
         if (outcome.status() == 201) {
             body = outcome.reservations();
@@ -79,95 +194,12 @@ public class ReservationCreationService {
             }
             body = problem;
         }
-        return new ReservationCreationHttpResponse(
-                outcome.status(), body, outcome.code(), result.replayed(), result.expiresAt());
+        return new Result(outcome.status(), body, outcome.code(), expiresAt, replayed);
     }
 
-    private String metricOutcome(ReservationCreationResult result) {
-        if (result.replayed()) {
-            return "replay";
-        }
-        String code = result.outcome().code();
-        if (code == null) {
-            return "completion";
-        }
-        return switch (code) {
-            case "IDEMPOTENCY_KEY_REUSED" -> "mismatch";
-            case "IDEMPOTENCY_IN_PROGRESS" -> "busy";
-            case "ACTIVE_RESERVATION_EXISTS" -> "active-conflict";
-            case "INVENTORY_ITEM_NOT_FOUND", "INVENTORY_ITEM_UNAVAILABLE", "INVALID_INVENTORY_REFERENCE" ->
-                "inventory-rejection";
-            case "INVENTORY_SERVICE_UNAVAILABLE" -> "unavailable";
-            case "INVENTORY_SERVICE_ERROR", "CREATION_RECONCILIATION_REQUIRED" -> "reconciliation";
-            default -> "other";
-        };
+    private void count(String outcome) {
+        metrics.counter("reservation.creation.idempotency", "outcome", outcome).increment();
     }
 
-    ReservationCreationResult execute(ReservationCreationPreparation preparation) {
-        try {
-            ReservationCreationPreparation current = preparation;
-            if (current.state() == ReservationCreationState.PENDING_LOCAL_CHECK) {
-                current = store.admitLocal(current.idempotencyKey(), current.leaseOwner());
-                if (current.state() == ReservationCreationState.COMPLETED) {
-                    return new ReservationCreationResult(current.outcome(), false, current.expiresAt());
-                }
-            }
-            return executeInventory(current);
-        } catch (ReservationCreationLeaseLostException exception) {
-            return new ReservationCreationResult(ReservationCreationOutcomes.busy(), false, null);
-        }
-    }
-
-    private ReservationCreationResult executeInventory(ReservationCreationPreparation preparation) {
-        Optional<ReservationCreationResult> deadline =
-                store.authorizeInventoryAttempt(preparation.idempotencyKey(), preparation.leaseOwner());
-        if (deadline.isPresent()) {
-            return deadline.orElseThrow();
-        }
-
-        List<String> serialNumbers = preparation.command().items().stream()
-                .map(ReservationCreationCommand.Item::serialNumber)
-                .toList();
-        try {
-            InventoryClaimResult inventory = inventoryGateway.claim(preparation.idempotencyKey(), serialNumbers);
-            return switch (inventory.type()) {
-                case CLAIMED -> store.finalizeSuccess(preparation.idempotencyKey(), preparation.leaseOwner());
-                case BUSY -> releaseBusy(preparation);
-                case MISSING, UNAVAILABLE, INVALID_REFERENCE, KEY_REUSED ->
-                    store.completeInventoryResult(preparation.idempotencyKey(), preparation.leaseOwner(), inventory);
-            };
-        } catch (InventoryServiceUnavailableException exception) {
-            Duration delay = recoveryDelay(preparation.attemptCount());
-            store.releaseForRetry(preparation.idempotencyKey(), preparation.leaseOwner(), delay);
-            return result(ReservationCreationOutcomes.inventoryServiceUnavailable());
-        } catch (InventoryProtocolException exception) {
-            return store.reconcileInventoryProtocol(preparation.idempotencyKey(), preparation.leaseOwner());
-        }
-    }
-
-    private ReservationCreationResult releaseBusy(ReservationCreationPreparation preparation) {
-        store.releaseForRetry(preparation.idempotencyKey(), preparation.leaseOwner(), BUSY_RETRY);
-        return new ReservationCreationResult(ReservationCreationOutcomes.busy(), false, null);
-    }
-
-    private Duration recoveryDelay(int previousAttempts) {
-        Duration initial = settings.recoveryInitialBackoff();
-        Duration maximum = settings.recoveryMaxBackoff();
-        int exponent = Math.min(previousAttempts, 20);
-        long multiplier = 1L << exponent;
-        long baseMillis;
-        try {
-            baseMillis = Math.multiplyExact(initial.toMillis(), multiplier);
-        } catch (ArithmeticException exception) {
-            baseMillis = maximum.toMillis();
-        }
-        baseMillis = Math.min(baseMillis, maximum.toMillis());
-        double jitter = settings.recoveryJitterFactor();
-        double factor = jitter == 0 ? 1 : 1 + ThreadLocalRandom.current().nextDouble(-jitter, jitter);
-        return Duration.ofMillis(Math.max(1, Math.round(baseMillis * factor)));
-    }
-
-    private ReservationCreationResult result(ReservationCreationOutcome outcome) {
-        return new ReservationCreationResult(outcome, false, null);
-    }
+    public record Result(int status, Object body, String code, Instant expiresAt, boolean replayed) {}
 }

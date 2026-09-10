@@ -31,7 +31,6 @@ import com.rentflow.dto.ProblemResponse;
 import com.rentflow.dto.ReservationCreationProblemResponse;
 import com.rentflow.dto.ReservationDTO;
 import com.rentflow.service.IdempotencyKeyParser;
-import com.rentflow.service.ReservationCreationHttpResponse;
 import com.rentflow.service.ReservationCreationService;
 import com.rentflow.service.ReservationService;
 import com.rentflow.service.ReservationSortField;
@@ -99,7 +98,7 @@ public class ReservationController {
             operationId = "createReservation",
             summary = "Create an atomic batch of HELD reservations",
             description =
-                    "Each item must start on or after the PostgreSQL UTC date. Matching idempotency retries replay the original result.",
+                    "Each item must start on or after the PostgreSQL UTC date. Terminal outcomes replay for seven days from a compact database ledger; creation runs only within the incoming request.",
             parameters =
                     @Parameter(
                             name = "Idempotency-Key",
@@ -126,20 +125,49 @@ public class ReservationController {
                                         @io.swagger.v3.oas.annotations.media.ArraySchema(
                                                 schema = @Schema(implementation = ReservationDTO.class)))),
         @ApiResponse(
+                responseCode = "400",
+                description =
+                        "Invalid input. Command-level and Inventory-reference failures are stored; framework binding failures are not.",
+                headers = {
+                    @Header(name = "Idempotency-Replayed", schema = @Schema(type = "boolean")),
+                    @Header(name = "Idempotency-Key-Expires-At", schema = @Schema(format = "date-time"))
+                },
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
                 responseCode = "409",
                 description = "An active reservation, unavailable Inventory item, or busy key prevented creation.",
-                headers =
-                        @Header(
-                                name = "Retry-After",
-                                description = "One second for IDEMPOTENCY_IN_PROGRESS only.",
-                                schema = @Schema(type = "integer")),
+                headers = {
+                    @Header(
+                            name = "Retry-After",
+                            description = "One second for IDEMPOTENCY_IN_PROGRESS only.",
+                            schema = @Schema(type = "integer")),
+                    @Header(name = "Idempotency-Replayed", schema = @Schema(type = "boolean")),
+                    @Header(name = "Idempotency-Key-Expires-At", schema = @Schema(format = "date-time"))
+                },
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
                                 schema = @Schema(implementation = ReservationCreationProblemResponse.class))),
-        @ApiResponse(responseCode = "422", description = "An Inventory item is missing or the key was reused."),
-        @ApiResponse(responseCode = "502", description = "Inventory returned an ambiguous response."),
-        @ApiResponse(responseCode = "503", description = "Inventory is unavailable or reconciliation is required."),
+        @ApiResponse(
+                responseCode = "422",
+                description = "An Inventory item is missing or an idempotency key was reused.",
+                headers = {
+                    @Header(name = "Idempotency-Replayed", schema = @Schema(type = "boolean")),
+                    @Header(name = "Idempotency-Key-Expires-At", schema = @Schema(format = "date-time"))
+                },
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ReservationCreationProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "502",
+                description = "Inventory returned an unexpected response; the outcome is not stored."),
+        @ApiResponse(
+                responseCode = "503",
+                description = "Inventory remained unavailable after foreground retries; the outcome is not stored."),
         @ApiResponse(
                 responseCode = "415",
                 description = "Unsupported request media type.",
@@ -157,11 +185,11 @@ public class ReservationController {
         } catch (IllegalArgumentException exception) {
             throw new RequestValidationException("Idempotency-Key", "must contain exactly one canonical UUID v4 value");
         }
-        ReservationCreationHttpResponse result = creationService.create(idempotencyKey, converter.toCommand(request));
+        ReservationCreationService.Result result = creationService.create(idempotencyKey, converter.toCommand(request));
         return creationResponse(result);
     }
 
-    private ResponseEntity<?> creationResponse(ReservationCreationHttpResponse result) {
+    private ResponseEntity<?> creationResponse(ReservationCreationService.Result result) {
         ResponseEntity.BodyBuilder response = ResponseEntity.status(result.status());
         if (result.expiresAt() != null) {
             response.header("Idempotency-Replayed", Boolean.toString(result.replayed()));

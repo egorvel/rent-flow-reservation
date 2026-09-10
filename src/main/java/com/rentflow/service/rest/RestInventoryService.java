@@ -13,9 +13,9 @@ import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.rentflow.model.InventoryClaimResult;
 import com.rentflow.model.ReservationCreationFailure;
 import com.rentflow.service.InventoryGateway;
+import com.rentflow.service.InventoryGateway.ClaimResult;
 import com.rentflow.service.InventoryProtocolException;
 import com.rentflow.service.InventoryServiceUnavailableException;
 
@@ -47,13 +47,12 @@ public class RestInventoryService implements InventoryGateway {
     }
 
     @Override
-    public InventoryClaimResult claim(UUID idempotencyKey, List<String> serialNumbers) {
+    public ClaimResult claim(UUID idempotencyKey, List<String> serialNumbers) {
         List<InventoryHttpClient.InventoryStatusChangeRequest> changes = serialNumbers.stream()
                 .map(serialNumber -> new InventoryHttpClient.InventoryStatusChangeRequest(serialNumber, RESERVED))
                 .toList();
-        Supplier<InventoryClaimResult> retriedCall =
-                Retry.decorateSupplier(retry, () -> request(idempotencyKey, changes));
-        Supplier<InventoryClaimResult> guardedCall = CircuitBreaker.decorateSupplier(circuitBreaker, retriedCall);
+        Supplier<ClaimResult> retriedCall = Retry.decorateSupplier(retry, () -> request(idempotencyKey, changes));
+        Supplier<ClaimResult> guardedCall = CircuitBreaker.decorateSupplier(circuitBreaker, retriedCall);
         try {
             return guardedCall.get();
         } catch (HttpClientErrorException exception) {
@@ -65,16 +64,15 @@ public class RestInventoryService implements InventoryGateway {
         }
     }
 
-    private InventoryClaimResult request(
-            UUID idempotencyKey, List<InventoryHttpClient.InventoryStatusChangeRequest> changes) {
+    private ClaimResult request(UUID idempotencyKey, List<InventoryHttpClient.InventoryStatusChangeRequest> changes) {
         ResponseEntity<Void> response = inventoryClient.reserve(idempotencyKey, changes);
         if (response.getStatusCode().value() == HttpStatus.NO_CONTENT.value()) {
-            return InventoryClaimResult.claimed();
+            return ClaimResult.claimed();
         }
         throw new UnexpectedInventoryResponseException(response.getStatusCode());
     }
 
-    private InventoryClaimResult decodeClientError(HttpClientErrorException exception, List<String> serialNumbers) {
+    private ClaimResult decodeClientError(HttpClientErrorException exception, List<String> serialNumbers) {
         InventoryProblem problem;
         try {
             problem = objectMapper.readValue(exception.getResponseBodyAsByteArray(), InventoryProblem.class);
@@ -84,23 +82,22 @@ public class RestInventoryService implements InventoryGateway {
 
         int status = exception.getStatusCode().value();
         if (status == 409 && "IDEMPOTENCY_IN_PROGRESS".equals(problem.code())) {
-            return InventoryClaimResult.busy();
+            return ClaimResult.busy();
         }
         if (status == 422 && "IDEMPOTENCY_KEY_REUSED".equals(problem.code())) {
-            return InventoryClaimResult.terminal(InventoryClaimResult.Type.KEY_REUSED, List.of());
+            return ClaimResult.terminal(ClaimResult.Type.KEY_REUSED, List.of());
         }
         if (status == 400 && "VALIDATION_FAILED".equals(problem.code())) {
-            return InventoryClaimResult.terminal(
-                    InventoryClaimResult.Type.INVALID_REFERENCE,
-                    invalidReferenceFailures(problem.violations(), serialNumbers));
+            return ClaimResult.terminal(
+                    ClaimResult.Type.INVALID_REFERENCE, invalidReferenceFailures(problem.violations(), serialNumbers));
         }
         if (status == 404 && "INVENTORY_ITEM_NOT_FOUND".equals(problem.code())) {
-            return InventoryClaimResult.terminal(
-                    InventoryClaimResult.Type.MISSING, businessFailures(problem.failedItems(), serialNumbers));
+            return ClaimResult.terminal(
+                    ClaimResult.Type.MISSING, businessFailures(problem.failedItems(), serialNumbers));
         }
         if (status == 409 && "INVALID_INVENTORY_STATUS_TRANSITION".equals(problem.code())) {
-            return InventoryClaimResult.terminal(
-                    InventoryClaimResult.Type.UNAVAILABLE, businessFailures(problem.failedItems(), serialNumbers));
+            return ClaimResult.terminal(
+                    ClaimResult.Type.UNAVAILABLE, businessFailures(problem.failedItems(), serialNumbers));
         }
         throw new InventoryProtocolException(new UnexpectedInventoryResponseException(exception.getStatusCode()));
     }

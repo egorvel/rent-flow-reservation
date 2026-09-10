@@ -7,7 +7,8 @@ and atomically claims every item as `RESERVED` through Inventory.
 
 The implementation follows the sibling Pricing service's MVC layers, DTO/converter pattern,
 Problem Details errors, page envelope, build checks, and schema ownership conventions.
-The source of truth is [the service-skeleton spec](.specs/service-skeleton/requirements.md).
+The sources of truth are [the service-skeleton spec](.specs/service-skeleton/requirements.md) and
+[the reservation-creation spec](.specs/reservation-creation/requirements.md).
 
 ## Platform
 
@@ -182,21 +183,32 @@ Defaults are page 0, size 20, sort `id`, direction `asc`. Size is 1–100. Any r
 be the primary sort; ties use `id ASC`. Direction is case-insensitive. Unknown, repeated, blank,
 invalid query parameters and offsets above 2147483647 are rejected. Filtering is deferred.
 
-Creation persists its intent before calling Inventory and forwards the same idempotency key to
-`PATCH /api/v1/inventory/status`. Configure Inventory with `INVENTORY_BASE_URL` (default
-`http://inventory`); connect/read timeouts are 500/1500 ms. Resource failures and Inventory
-502/503/504 responses receive one 500 ms jittered retry behind the shared `inventory` circuit
-breaker. Pending work recovers every 30 seconds with database leases. Automatic calls stop after
-seven days and require manual reconciliation; completed results remain replayable for seven days.
-Retry `409 IDEMPOTENCY_IN_PROGRESS` after `Retry-After`, and retry temporary `503` responses with
-the same key. Treat reconciliation `502`/`503` responses as indeterminate until Reservation and
-Inventory state have been compared. Metrics use the `reservation.creation.*` prefix and bounded
-outcome tags. Deploy this contract together with Inventory's idempotent status-transition endpoint.
+Creation acquires a PostgreSQL transaction advisory lock for the public key, checks the compact
+terminal ledger, validates the current PostgreSQL UTC date, checks local active reservations once,
+and forwards the same key to `PATCH /api/v1/inventory/status`. The local transaction remains open
+through that synchronous call. On success, the created reservations and replayable `201` response
+snapshot commit together. Known validation, local-conflict, and Inventory business failures are
+also stored and replayed.
+
+Configure Inventory with `INVENTORY_BASE_URL` (default `http://inventory`); connect/read timeouts
+are 500/1500 ms. Resource failures and Inventory 502/503/504 responses receive up to five total
+foreground attempts inside one circuit-breaker call. Retry waits use exponential nominal delays of
+200, 400, 800, and 1600 ms with 20-percent jitter.
+
+Reservation does no creation work after the HTTP response returns. Matching terminal responses
+replay from `reservation_creation_requests` for seven days without local or Inventory work.
+Concurrent execution of the same key returns `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1`;
+different payloads under an unexpired key return `422 IDEMPOTENCY_KEY_REUSED`. Temporary `502` and
+`503` integration results are not stored, so a same-key client retry starts another synchronous
+attempt and uses Inventory's own idempotency record if Inventory previously committed. The only
+background task deletes expired ledger rows.
 
 ## Migrations and health
 
-V1 creates `reservation.reservations`; V2 adds the durable creation workflow and active lookup
-index. Flyway history lives in `reservation.flyway_schema_history`.
+V1 creates `reservation.reservations`. The replacement V2 creates the six-column terminal
+idempotency ledger, adds the database timestamp default, and adds the active lookup index. This V2
+supersedes the unshipped workflow migration; there is no V3. Flyway history lives in
+`reservation.flyway_schema_history`.
 Hibernate validates mappings and never generates DDL. Flyway cannot create schemas and is the
 sole mechanism for evolving Reservation-owned application objects after platform provisioning.
 Add migrations at `src/main/resources/db/migration/V{n}__description.sql` or

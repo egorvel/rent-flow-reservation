@@ -23,9 +23,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 
 import com.rentflow.model.Reservation;
+import com.rentflow.repository.ReservationCreationRequestRepository;
 import com.rentflow.repository.ReservationRepository;
-import com.rentflow.service.DatabaseTimeProvider;
-import com.rentflow.service.DatabaseTimeSnapshot;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,7 +43,7 @@ class MigrationIT extends PostgresIntegrationTest {
     private ReservationRepository repository;
 
     @Autowired
-    private DatabaseTimeProvider databaseTimeProvider;
+    private ReservationCreationRequestRepository creationRequests;
 
     @Test
     void usesOnlyItsRestrictedRoleAndOwnedSchema() throws Exception {
@@ -83,10 +82,10 @@ class MigrationIT extends PostgresIntegrationTest {
 
     @Test
     void migrationsRunOnceAndCommittedDataSurvivesRestart() {
-        Instant databaseBefore = databaseTimeProvider.now().observedAt();
+        Instant databaseBefore = creationRequests.databaseTime();
         Reservation saved = repository.saveAndFlush(new Reservation(
                 "RESTART-001", "CUSTOMER-1", "ORDER-1", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3)));
-        Instant databaseAfter = databaseTimeProvider.now().observedAt();
+        Instant databaseAfter = creationRequests.databaseTime();
         assertThat(saved.getTimestamp()).isBetween(databaseBefore, databaseAfter);
         assertThat(saved.getTimestamp().getNano() % 1000).isZero();
         assertThat(flyway.migrate().migrationsExecuted).isZero();
@@ -101,6 +100,46 @@ class MigrationIT extends PostgresIntegrationTest {
             assertThat(restored.getTimestamp()).isEqualTo(saved.getTimestamp());
             assertThat(restored.getSerialNumber()).isEqualTo("RESTART-001");
         }
+    }
+
+    @Test
+    void creationIdempotencyTableIsATerminalLedger() {
+        assertThat(jdbc.queryForList("""
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'reservation'
+                          AND table_name = 'reservation_creation_requests'
+                        ORDER BY ordinal_position
+                        """, String.class))
+                .containsExactly(
+                        "idempotency_key", "fingerprint", "http_status", "outcome", "recorded_at", "expires_at");
+        assertThat(jdbc.queryForList("""
+                        SELECT indexname
+                        FROM pg_indexes
+                        WHERE schemaname = 'reservation'
+                          AND tablename = 'reservation_creation_requests'
+                        """, String.class))
+                .containsExactlyInAnyOrder(
+                        "reservation_creation_requests_pkey", "idx_reservation_creation_requests_expiry");
+    }
+
+    @Test
+    void creationLedgerConstraintsProtectTerminalOutcomes() {
+        UUID validKey = UUID.randomUUID();
+        insertCreationOutcome(validKey, "0".repeat(64), 201, "{\"status\":201}", "168 hours");
+
+        assertThatThrownBy(() ->
+                        insertCreationOutcome(UUID.randomUUID(), "not-sha256", 201, "{\"status\":201}", "168 hours"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() ->
+                        insertCreationOutcome(UUID.randomUUID(), "1".repeat(64), 500, "{\"status\":500}", "168 hours"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() ->
+                        insertCreationOutcome(UUID.randomUUID(), "2".repeat(64), 409, "{\"status\":422}", "168 hours"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() ->
+                        insertCreationOutcome(UUID.randomUUID(), "3".repeat(64), 409, "{\"status\":409}", "24 hours"))
+                .isInstanceOf(DataIntegrityViolationException.class);
     }
 
     @Test
@@ -124,10 +163,10 @@ class MigrationIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void databaseTimeReturnsOneUtcSample() {
-        DatabaseTimeSnapshot time = databaseTimeProvider.now();
-        assertThat(time.utcDate())
-                .isEqualTo(time.observedAt().atOffset(java.time.ZoneOffset.UTC).toLocalDate());
+    void databaseTimeAndUtcDateComeFromPostgresql() {
+        Instant time = creationRequests.databaseTime();
+        assertThat(creationRequests.databaseUtcDate())
+                .isEqualTo(time.atOffset(java.time.ZoneOffset.UTC).toLocalDate());
         assertThat(jdbc.queryForObject(
                         "SELECT (TIMESTAMPTZ '2026-09-08 23:59:59.999999+00' AT TIME ZONE 'UTC')::date",
                         LocalDate.class))
@@ -212,6 +251,14 @@ class MigrationIT extends PostgresIntegrationTest {
                 start,
                 end,
                 status);
+    }
+
+    private void insertCreationOutcome(UUID key, String fingerprint, int status, String outcome, String expiry) {
+        jdbc.update("""
+                INSERT INTO reservation.reservation_creation_requests (
+                    idempotency_key, fingerprint, http_status, outcome, recorded_at, expires_at
+                ) VALUES (?, ?, ?, ?::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + ?::interval)
+                """, key, fingerprint, status, outcome, expiry);
     }
 
     private ConfigurableApplicationContext start(Map<String, Object> overrides) {

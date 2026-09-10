@@ -29,7 +29,8 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.rentflow.dto.ProblemResponse;
 import com.rentflow.dto.ViolationResponse;
-import com.rentflow.service.ReservationCreationValidationException;
+import com.rentflow.service.InventoryProtocolException;
+import com.rentflow.service.InventoryServiceUnavailableException;
 import com.rentflow.service.ReservationNotFoundException;
 
 import tools.jackson.databind.exc.InvalidFormatException;
@@ -52,6 +53,31 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 List.of());
     }
 
+    @ExceptionHandler(InventoryServiceUnavailableException.class)
+    ResponseEntity<ProblemResponse> handleInventoryUnavailable(
+            InventoryServiceUnavailableException exception, WebRequest request) {
+        return response(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "urn:rentflow:problem:inventory-service-unavailable",
+                "Inventory service unavailable",
+                "Inventory is temporarily unavailable; retry this request with the same key.",
+                "INVENTORY_SERVICE_UNAVAILABLE",
+                request,
+                List.of());
+    }
+
+    @ExceptionHandler(InventoryProtocolException.class)
+    ResponseEntity<ProblemResponse> handleInventoryProtocol(InventoryProtocolException exception, WebRequest request) {
+        return response(
+                HttpStatus.BAD_GATEWAY,
+                "urn:rentflow:problem:inventory-service-error",
+                "Inventory service error",
+                "Inventory returned an unexpected response.",
+                "INVENTORY_SERVICE_ERROR",
+                request,
+                List.of());
+    }
+
     @ExceptionHandler(ConstraintViolationException.class)
     ResponseEntity<ProblemResponse> handleConstraintViolation(
             ConstraintViolationException exception, WebRequest request) {
@@ -67,16 +93,6 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<ProblemResponse> handleRequestValidation(RequestValidationException exception, WebRequest request) {
         return validationResponse(
                 exception.getViolations().stream().sorted(VIOLATION_ORDER).toList(), request);
-    }
-
-    @ExceptionHandler(ReservationCreationValidationException.class)
-    ResponseEntity<ProblemResponse> handleReservationCreationValidation(
-            ReservationCreationValidationException exception, WebRequest request) {
-        List<ViolationResponse> violations = exception.getViolations().stream()
-                .map(violation -> new ViolationResponse(violation.field(), violation.message()))
-                .sorted(VIOLATION_ORDER)
-                .toList();
-        return validationResponse(violations, request);
     }
 
     @Override

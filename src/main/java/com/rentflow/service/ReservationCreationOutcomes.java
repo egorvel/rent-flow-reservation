@@ -27,6 +27,17 @@ public final class ReservationCreationOutcomes {
                 List.of());
     }
 
+    public static ReservationCreationOutcome validation(List<ReservationCommandViolation> violations) {
+        return problem(
+                400,
+                "validation-failed",
+                "Request validation failed",
+                "One or more request values are invalid.",
+                "VALIDATION_FAILED",
+                List.of(),
+                violations);
+    }
+
     public static ReservationCreationOutcome inventoryMissing(List<ReservationCreationFailure> failures) {
         return problem(
                 422,
@@ -82,39 +93,6 @@ public final class ReservationCreationOutcomes {
                 "Idempotency key in progress",
                 "A request with this idempotency key is already in progress.",
                 "IDEMPOTENCY_IN_PROGRESS",
-                List.of(),
-                List.of());
-    }
-
-    public static ReservationCreationOutcome inventoryServiceUnavailable() {
-        return problem(
-                503,
-                "inventory-service-unavailable",
-                "Inventory service unavailable",
-                "Inventory is temporarily unavailable; retry this intent with the same key.",
-                "INVENTORY_SERVICE_UNAVAILABLE",
-                List.of(),
-                List.of());
-    }
-
-    public static ReservationCreationOutcome inventoryServiceError() {
-        return problem(
-                502,
-                "inventory-service-error",
-                "Inventory service error",
-                "Inventory returned an unexpected response.",
-                "INVENTORY_SERVICE_ERROR",
-                List.of(),
-                List.of());
-    }
-
-    public static ReservationCreationOutcome reconciliationRequired() {
-        return problem(
-                503,
-                "creation-reconciliation-required",
-                "Creation reconciliation required",
-                "The creation outcome requires reconciliation before another attempt.",
-                "CREATION_RECONCILIATION_REQUIRED",
                 List.of(),
                 List.of());
     }
