@@ -45,6 +45,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class OpenApiIT extends PostgresIntegrationTest {
     private static final String COLLECTION = "/api/v1/reservations";
     private static final String ITEM = COLLECTION + "/{id}";
+    private static final String CANCELLATION = ITEM + "/cancel";
     private static final Set<String> INPUT_FIELDS = Set.of("customerId", "orderId", "items");
 
     @Autowired
@@ -73,10 +74,10 @@ class OpenApiIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void exposesExactlyTheFiveOperationsAndUsableSwaggerUi() throws Exception {
+    void exposesExactlyTheSixOperationsAndUsableSwaggerUi() throws Exception {
         assertThat(document.path("openapi").asString()).startsWith("3.");
         assertThat(document.at("/info/title").asString()).isEqualTo("RentFlow Reservation API");
-        assertThat(document.path("paths").propertyNames()).containsExactlyInAnyOrder(COLLECTION, ITEM);
+        assertThat(document.path("paths").propertyNames()).containsExactlyInAnyOrder(COLLECTION, ITEM, CANCELLATION);
         assertThat(document.path("paths").path(COLLECTION).propertyNames()).containsExactlyInAnyOrder("get", "post");
         assertThat(document.path("paths").path(ITEM).propertyNames()).containsExactlyInAnyOrder("get", "put", "delete");
         assertThat(operation(COLLECTION, "post").path("operationId").asString()).isEqualTo("createReservation");
@@ -84,6 +85,8 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertThat(operation(ITEM, "get").path("operationId").asString()).isEqualTo("getReservation");
         assertThat(operation(ITEM, "put").path("operationId").asString()).isEqualTo("replaceReservation");
         assertThat(operation(ITEM, "delete").path("operationId").asString()).isEqualTo("deleteReservation");
+        assertThat(operation(CANCELLATION, "post").path("operationId").asString())
+                .isEqualTo("cancelReservation");
         assertThat(document.at("/components/securitySchemes").isMissingNode()).isTrue();
         mvc.perform(get("/swagger-ui.html")).andExpect(status().is3xxRedirection());
         mvc.perform(get("/swagger-ui/index.html"))
@@ -186,6 +189,18 @@ class OpenApiIT extends PostgresIntegrationTest {
         }
         assertThat(operation(ITEM, "delete").at("/responses/204/content").isMissingNode())
                 .isTrue();
+        JsonNode cancellation = operation(CANCELLATION, "post");
+        assertThat(cancellation.path("responses").propertyNames()).contains("204", "400", "404", "405", "406", "500");
+        assertThat(cancellation.at("/responses/204/content").isMissingNode()).isTrue();
+        assertThat(cancellation.path("requestBody").isMissingNode()).isTrue();
+        assertThat(cancellation
+                        .path("parameters")
+                        .valueStream()
+                        .noneMatch(
+                                parameter -> parameter.path("name").asString().equals("Idempotency-Key")))
+                .isTrue();
+        assertThat(cancellation.path("description").asString())
+                .contains("Reservation outcome", "Kafka publication", "Inventory release");
         assertThat(parameter("page").at("/schema/default").asInt()).isZero();
         assertThat(parameter("size").at("/schema/default").asInt()).isEqualTo(20);
         assertThat(parameter("size").at("/schema/maximum").asInt()).isEqualTo(100);

@@ -31,6 +31,7 @@ import com.rentflow.dto.ProblemResponse;
 import com.rentflow.dto.ReservationCreationProblemResponse;
 import com.rentflow.dto.ReservationDTO;
 import com.rentflow.service.IdempotencyKeyParser;
+import com.rentflow.service.ReservationCancellationService;
 import com.rentflow.service.ReservationCreationService;
 import com.rentflow.service.ReservationService;
 import com.rentflow.service.ReservationSortField;
@@ -85,12 +86,17 @@ public class ReservationController {
     private static final Set<String> COLLECTION_PARAMETERS = Set.of("page", "size", "sort", "direction");
     private final ReservationService service;
     private final ReservationCreationService creationService;
+    private final ReservationCancellationService cancellationService;
     private final ReservationConverter converter;
 
     public ReservationController(
-            ReservationService service, ReservationCreationService creationService, ReservationConverter converter) {
+            ReservationService service,
+            ReservationCreationService creationService,
+            ReservationCancellationService cancellationService,
+            ReservationConverter converter) {
         this.service = service;
         this.creationService = creationService;
+        this.cancellationService = cancellationService;
         this.converter = converter;
     }
 
@@ -217,6 +223,30 @@ public class ReservationController {
     @GetMapping("/{id}")
     public ReservationDTO get(@PathVariable UUID id) {
         return converter.toResponse(service.get(id));
+    }
+
+    @Operation(
+            operationId = "cancelReservation",
+            summary = "Cancel a reservation",
+            description =
+                    "Changes an eligible reservation to CANCELLED and durably records an event for asynchronous Inventory release. A 204 response reports only the committed Reservation outcome; Kafka publication and Inventory release may complete later.")
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "204",
+                description = "Reservation cancelled or already cancelled.",
+                content = @Content),
+        @ApiResponse(
+                responseCode = "404",
+                description = "Reservation not found.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class)))
+    })
+    @PostMapping("/{id}/cancel")
+    public ResponseEntity<Void> cancel(@PathVariable UUID id) {
+        cancellationService.cancel(id);
+        return ResponseEntity.noContent().build();
     }
 
     @Operation(

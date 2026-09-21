@@ -23,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 
 import com.rentflow.model.Reservation;
+import com.rentflow.repository.ReservationCancellationOutboxRepository;
 import com.rentflow.repository.ReservationCreationRequestRepository;
 import com.rentflow.repository.ReservationRepository;
 import com.rentflow.support.PostgresIntegrationTest;
@@ -45,6 +46,9 @@ class MigrationIT extends PostgresIntegrationTest {
     @Autowired
     private ReservationCreationRequestRepository creationRequests;
 
+    @Autowired
+    private ReservationCancellationOutboxRepository cancellationOutboxes;
+
     @Test
     void usesOnlyItsRestrictedRoleAndOwnedSchema() throws Exception {
         assertThat(jdbc.queryForObject("SELECT current_user", String.class)).isEqualTo("reservation");
@@ -61,7 +65,11 @@ class MigrationIT extends PostgresIntegrationTest {
         assertThat(jdbc.queryForList(
                         "SELECT tablename FROM pg_tables WHERE schemaname = 'reservation' AND tableowner = 'reservation'",
                         String.class))
-                .containsExactlyInAnyOrder("reservations", "reservation_creation_requests", "flyway_schema_history");
+                .containsExactlyInAnyOrder(
+                        "reservations",
+                        "reservation_creation_requests",
+                        "reservation_cancellation_outbox",
+                        "flyway_schema_history");
         assertThat(jdbc.queryForObject(
                         "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('reservations', 'flyway_schema_history')",
                         Integer.class))
@@ -90,9 +98,9 @@ class MigrationIT extends PostgresIntegrationTest {
         assertThat(saved.getTimestamp().getNano() % 1000).isZero();
         assertThat(flyway.migrate().migrationsExecuted).isZero();
         assertThat(jdbc.queryForObject(
-                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2') AND success",
+                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2', '3') AND success",
                         Integer.class))
-                .isEqualTo(2);
+                .isEqualTo(3);
         try (ConfigurableApplicationContext context = start(Map.of())) {
             Reservation restored = context.getBean(ReservationRepository.class)
                     .findById(saved.getId())
@@ -121,6 +129,103 @@ class MigrationIT extends PostgresIntegrationTest {
                         """, String.class))
                 .containsExactlyInAnyOrder(
                         "reservation_creation_requests_pkey", "idx_reservation_creation_requests_expiry");
+    }
+
+    @Test
+    void cancellationOutboxHasTheImmutableEventAndMutableDeliveryShape() {
+        assertThat(jdbc.queryForList("""
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'reservation'
+                          AND table_name = 'reservation_cancellation_outbox'
+                        ORDER BY ordinal_position
+                        """, String.class))
+                .containsExactly(
+                        "event_id",
+                        "record_key",
+                        "payload",
+                        "occurred_at",
+                        "published_at",
+                        "attempt_count",
+                        "next_attempt_at",
+                        "last_failure_at",
+                        "last_failure_code");
+        assertThat(jdbc.queryForList("""
+                        SELECT indexname
+                        FROM pg_indexes
+                        WHERE schemaname = 'reservation'
+                          AND tablename = 'reservation_cancellation_outbox'
+                        """, String.class))
+                .containsExactlyInAnyOrder(
+                        "reservation_cancellation_outbox_pkey",
+                        "idx_reservation_cancellation_outbox_fifo",
+                        "idx_reservation_cancellation_outbox_cleanup");
+        assertThat(jdbc.queryForObject("""
+                        SELECT count(*)
+                        FROM information_schema.table_constraints
+                        WHERE table_schema = 'reservation'
+                          AND table_name = 'reservation_cancellation_outbox'
+                          AND constraint_type = 'FOREIGN KEY'
+                        """, Integer.class)).isZero();
+    }
+
+    @Test
+    void cancellationOutboxConstraintsRejectInvalidEventAndDeliveryState() {
+        insertCancellationOutbox(
+                UUID.randomUUID(), "DRILL-001", "{\"eventId\":\"valid\"}", null, 0, "CURRENT_TIMESTAMP", null, null);
+
+        assertThatThrownBy(() -> insertCancellationOutbox(
+                        UUID.randomUUID(), "/bad", "{\"eventId\":\"valid\"}", null, 0, "CURRENT_TIMESTAMP", null, null))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> insertCancellationOutbox(
+                        UUID.randomUUID(), "DRILL-002", "[]", null, 0, "CURRENT_TIMESTAMP", null, null))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> insertCancellationOutbox(
+                        UUID.randomUUID(),
+                        "DRILL-003",
+                        "{\"eventId\":1,\"eventId\":2}",
+                        null,
+                        0,
+                        "CURRENT_TIMESTAMP",
+                        null,
+                        null))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> insertCancellationOutbox(
+                        UUID.randomUUID(),
+                        "DRILL-004",
+                        "{\"eventId\":\"valid\"}",
+                        "CURRENT_TIMESTAMP",
+                        -1,
+                        null,
+                        null,
+                        null))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> insertCancellationOutbox(
+                        UUID.randomUUID(),
+                        "DRILL-005",
+                        "{\"eventId\":\"valid\"}",
+                        null,
+                        1,
+                        "CURRENT_TIMESTAMP",
+                        "CURRENT_TIMESTAMP",
+                        null))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> jdbc.update("""
+                        INSERT INTO reservation.reservation_cancellation_outbox (
+                            event_id, record_key, payload, occurred_at, attempt_count, next_attempt_at
+                        ) VALUES (?, 'DRILL-006', to_json(repeat('x', 4097))::text, CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP)
+                        """, UUID.randomUUID()))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    void outboxTimeAndPendingStatisticsComeFromPostgresql() {
+        insertCancellationOutbox(
+                UUID.randomUUID(), "STATS-001", "{\"eventId\":\"stats\"}", null, 0, "CURRENT_TIMESTAMP", null, null);
+        Instant time = cancellationOutboxes.databaseTime();
+        assertThat(time).isBetween(Instant.now().minusSeconds(5), Instant.now().plusSeconds(5));
+        assertThat(cancellationOutboxes.countByPublishedAtIsNull()).isGreaterThanOrEqualTo(1);
+        assertThat(cancellationOutboxes.oldestPendingOccurredAt()).isPresent();
     }
 
     @Test
@@ -259,6 +364,32 @@ class MigrationIT extends PostgresIntegrationTest {
                     idempotency_key, fingerprint, http_status, outcome, recorded_at, expires_at
                 ) VALUES (?, ?, ?, ?::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + ?::interval)
                 """, key, fingerprint, status, outcome, expiry);
+    }
+
+    private void insertCancellationOutbox(
+            UUID eventId,
+            String recordKey,
+            String payload,
+            String publishedAtExpression,
+            int attemptCount,
+            String nextAttemptAtExpression,
+            String failureAtExpression,
+            String failureCode) {
+        String publishedAt = publishedAtExpression == null ? "NULL" : publishedAtExpression;
+        String nextAttemptAt = nextAttemptAtExpression == null ? "NULL" : nextAttemptAtExpression;
+        String failureAt = failureAtExpression == null ? "NULL" : failureAtExpression;
+        jdbc.update(
+                """
+                        INSERT INTO reservation.reservation_cancellation_outbox (
+                            event_id, record_key, payload, occurred_at, published_at, attempt_count,
+                            next_attempt_at, last_failure_at, last_failure_code
+                        ) VALUES (?, ?, ?, CURRENT_TIMESTAMP, %s, ?, %s, %s, ?)
+                        """.formatted(publishedAt, nextAttemptAt, failureAt),
+                eventId,
+                recordKey,
+                payload,
+                attemptCount,
+                failureCode);
     }
 
     private ConfigurableApplicationContext start(Map<String, Object> overrides) {

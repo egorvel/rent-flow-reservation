@@ -30,6 +30,20 @@ spring:
         base-url: ${INVENTORY_BASE_URL:http://inventory}
         connect-timeout: 500ms
         read-timeout: 1500ms
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    admin:
+      fail-fast: false
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        request.timeout.ms: 30000
+        delivery.timeout.ms: 45000
+        max.block.ms: 5000
 
 springdoc:
   paths-to-match: /api/v1/**
@@ -83,4 +97,20 @@ reservation:
   creation:
     cleanup:
       cron: "0 0 3 * * *"
+      runtime-budget: 60s
+  cancellation:
+    topic: ${RESERVATION_CANCELLATION_TOPIC:rentflow.reservation.cancelled.v1}
+    max-payload-bytes: 4096
+    relay:
+      fixed-delay: 1s
+      runtime-budget: 5s
+      max-events-per-run: 100
+      send-timeout: 50s
+    retry:
+      initial-backoff: 1s
+      multiplier: 2
+      max-backoff: 5m
+      jitter: 0.2
+    cleanup:
+      cron: "0 30 3 * * *"
       runtime-budget: 60s

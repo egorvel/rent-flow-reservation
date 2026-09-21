@@ -1,20 +1,24 @@
 # RentFlow Reservation Service
 
-Reservation CRUD with atomic, idempotent batch creation, executable Swagger documentation, Flyway
-migrations, PostgreSQL persistence, Inventory integration, health probes, container packaging, and
-automated verification. Creation assigns `HELD`, rejects a second active reservation for an item,
-and atomically claims every item as `RESERVED` through Inventory.
+Reservation CRUD with atomic, idempotent batch creation, asynchronous cancellation, executable
+Swagger documentation, Flyway migrations, PostgreSQL persistence, Inventory integration, health
+probes, container packaging, and automated verification. Creation assigns `HELD`, rejects a
+second active reservation for an item, and atomically claims every item as `RESERVED` through
+Inventory. Cancellation uses a transactional outbox to release the item through Kafka without
+making the HTTP request wait for Inventory.
 
 The implementation follows the sibling Pricing service's MVC layers, DTO/converter pattern,
 Problem Details errors, page envelope, build checks, and schema ownership conventions.
 The sources of truth are [the service-skeleton spec](.specs/service-skeleton/requirements.md) and
-[the reservation-creation spec](.specs/reservation-creation/requirements.md).
+[the reservation-creation spec](.specs/reservation-creation/requirements.md), and
+[the reservation-cancellation spec](.specs/reservation-cancellation/requirements.md).
 
 ## Platform
 
-Java 25, Spring Boot 4.1.0, Maven 3.9, PostgreSQL 18.4, Flyway, Spring Data JPA/Hibernate,
-Springdoc 3.0.3, and Testcontainers 2.0.5. Hibernate, JDBC, Jackson, and Flyway versions are
-managed by Spring Boot. Maven Wrapper pins Maven 3.9.16 and verifies its distribution checksum.
+Java 25, Spring Boot 4.1.0, Maven 3.9, PostgreSQL 18.4, Kafka 4.3.1, Flyway, Spring Data
+JPA/Hibernate, Spring Kafka, Springdoc 3.0.3, and Testcontainers 2.0.5. Hibernate, JDBC, Jackson,
+Kafka clients, and Flyway versions are managed by Spring Boot. Maven Wrapper pins Maven 3.9.16 and
+verifies its distribution checksum.
 
 Local prerequisites: JDK 25 and Docker with Compose v2. Maven 3.9 is needed for the bare `mvn`
 command; `./mvnw` works without a system Maven installation. The wrapper downloads its pinned
@@ -32,7 +36,11 @@ OpenAPI: <http://localhost:8081/v3/api-docs>
 API: <http://localhost:8081/api/v1/reservations>
 
 The standalone development stack runs PostgreSQL on `127.0.0.1:5433`, the application on
-`127.0.0.1:8081`, and an internal deterministic Inventory stub for local creation requests.
+`127.0.0.1:8081`, and an internal deterministic Inventory stub for local creation requests. It
+does not own a Kafka broker; cancellation remains durably buffered in the outbox until a broker is
+available. Use the `rent-flow-common` stack for the complete local Reservation-to-Inventory flow,
+or supply `KAFKA_BOOTSTRAP_SERVERS` and activate the `local` profile when connecting this service
+to a development broker.
 PostgreSQL stores data in the named `rentflow-postgres-data` volume mounted at
 `/var/lib/postgresql` for PostgreSQL 18. Use `INVENTORY_BASE_URL` when running against Inventory.
 
@@ -58,6 +66,8 @@ administrator. Override local settings through environment variables or a gitign
 | POSTGRES_PASSWORD | rentflow-admin-local | Local bootstrap administrator password |
 | RESERVATION_DB_USER | reservation | Local application role and owner of the reservation schema |
 | RESERVATION_DB_PASSWORD | reservation-local | Local reservation role password |
+| KAFKA_BOOTSTRAP_SERVERS | localhost:9092 | Kafka bootstrap address for cancellation publication |
+| RESERVATION_CANCELLATION_TOPIC | rentflow.reservation.cancelled.v1 | Version-1 source topic |
 
 ## Run Java locally
 
@@ -130,6 +140,7 @@ row ends today or later. Outdated and `CANCELLED` rows do not block creation.
 | GET | /api/v1/reservations/{id} | 200 reservation |
 | GET | /api/v1/reservations | 200 bounded page |
 | PUT | /api/v1/reservations/{id} | 200 full replacement |
+| POST | /api/v1/reservations/{id}/cancel | 204 local cancellation committed or already cancelled |
 | DELETE | /api/v1/reservations/{id} | 204 permanent deletion |
 
 PUT requires all five client-assigned detail fields plus `status` (`HELD`, `CONFIRMED`, or
@@ -143,6 +154,53 @@ Errors use `application/problem+json` with `type`, `title`, `status`, `detail`, 
 machine-readable `code`; validation errors add `violations` sorted by field and message.
 Invalid requests return 400, unsupported methods 405, unacceptable response media 406, unsupported
 request media 415, and unexpected failures a sanitized 500. Swagger describes schemas and examples.
+
+### Cancellation and Inventory release
+
+`POST /api/v1/reservations/{id}/cancel` has no request body and requires no `Idempotency-Key`.
+`HELD` and `CONFIRMED` become `CANCELLED`; an already `CANCELLED` reservation is an idempotent
+`204` no-op. A missing reservation returns `404 RESERVATION_NOT_FOUND`, and a malformed UUID
+returns `400 VALIDATION_FAILED`. Existing PUT and DELETE behavior remains unchanged and can still
+bypass event publication in this increment.
+
+The status transition and one `reservation_cancellation_outbox` row commit in the same local
+transaction. The response does not call Inventory, wait for Kafka, or mean that Inventory has
+already released the item. A scheduled relay polls every second and publishes the globally oldest
+eligible row to `rentflow.reservation.cancelled.v1`. One PostgreSQL transaction advisory lock
+allows only one active relay instance, and a failed oldest row deliberately blocks later rows to
+preserve FIFO order.
+
+The Kafka key is the exact case-sensitive serial number in UTF-8. The compact UTF-8 value contains
+exactly these version-1 fields:
+
+```json
+{"eventId":"d880f919-2b5c-4f7e-a56d-e047e7d932a6","eventType":"ReservationCancelled","eventVersion":1,"occurredAt":"2026-09-15T15:30:00Z","serialNumber":"DRILL-001"}
+```
+
+The producer uses `acks=all`, idempotence, and byte-array serializers. Every retry reuses the
+persisted event ID, key, and JSON bytes. PostgreSQL and Kafka do not share a transaction, so
+delivery is at least once: a lost acknowledgement or a database failure after broker acceptance
+can publish a duplicate. Inventory's inbox suppresses repeated effects by event ID; producer
+idempotence alone is not an end-to-end exactly-once guarantee.
+
+Failed sends retry indefinitely with persisted exponential backoff from one second to a nominal
+five-minute cap and 20-percent jitter. Kafka is intentionally excluded from readiness so a broker
+outage does not prevent database-backed cancellation; nonzero pending count and oldest-event age
+are the operational signals. The source topic has three partitions, delete cleanup, and seven-day
+retention. Local/test replication is one; production infrastructure targets replication three
+and minimum in-sync replicas two and provisions the topic before rollout.
+
+Acknowledged rows are retained for 30 days and deleted in skip-locked chunks of 1000 by the 03:30
+UTC cleanup. Unpublished rows are never aged out. If a source record expires before Inventory
+processes it, operators must first inspect Inventory state and inbox history, account for version
+1's stale-first-delivery limitation, and only then republish the retained exact key/value under
+the same event ID. There is no automatic replay or administrative replay endpoint.
+
+Operational metrics are `reservation.cancellation.outbox.publish.attempts`,
+`reservation.cancellation.outbox.retries.scheduled`, `reservation.cancellation.outbox.pending`,
+`reservation.cancellation.outbox.oldest.age`, and the
+`reservation.cancellation.outbox.cleanup.*` family. Labels and logs exclude serial numbers,
+payloads, exception messages, and customer/order data.
 
 ## Try every operation
 
@@ -173,6 +231,9 @@ curl --fail-with-body \
 curl --fail-with-body --request PUT --header 'Content-Type: application/json' \
   --data '{"serialNumber":"DRILL-001","customerId":"CUSTOMER-001","orderId":"ORDER-001","startDate":"2026-10-02","endDate":"2026-10-05","status":"CONFIRMED"}' \
   "$BASE_URL/api/v1/reservations/$RESERVATION_ID"
+
+curl --fail-with-body --request POST --output /dev/null --write-out '%{http_code}\n' \
+  "$BASE_URL/api/v1/reservations/$RESERVATION_ID/cancel"
 
 curl --fail-with-body --request DELETE --output /dev/null --write-out '%{http_code}\n' \
   "$BASE_URL/api/v1/reservations/$RESERVATION_ID"
@@ -206,8 +267,8 @@ background task deletes expired ledger rows.
 ## Migrations and health
 
 V1 creates `reservation.reservations`. The replacement V2 creates the six-column terminal
-idempotency ledger, adds the database timestamp default, and adds the active lookup index. This V2
-supersedes the unshipped workflow migration; there is no V3. Flyway history lives in
+idempotency ledger, adds the database timestamp default, and adds the active lookup index. V3 adds
+the cancellation outbox and its partial FIFO/cleanup indexes. Flyway history lives in
 `reservation.flyway_schema_history`.
 Hibernate validates mappings and never generates DDL. Flyway cannot create schemas and is the
 sole mechanism for evolving Reservation-owned application objects after platform provisioning.
@@ -216,8 +277,9 @@ Add migrations at `src/main/resources/db/migration/V{n}__description.sql` or
 create the shared database/role/schema in a migration, or modify another service's objects.
 
 `/livez` reports application liveness independently of the database. `/readyz` includes database
-health and returns 503 during an outage, recovering when PostgreSQL returns. `/actuator/health`
-is also available; other Actuator endpoints and detailed health components are not exposed.
+health, but deliberately excludes Kafka, and returns 503 during a database outage before
+recovering when PostgreSQL returns. `/actuator/health` is also available; other Actuator endpoints
+and detailed health components are not exposed.
 The runtime image's healthcheck uses `/readyz` on `${SERVER_PORT:-8080}`.
 
 ## Verification
@@ -230,9 +292,10 @@ mvn -B -ntp clean verify
 
 Or use the pinned wrapper: `./mvnw -B -ntp clean verify`. The lifecycle compiles and packages the
 application, enforces Java/Maven/dependency rules, runs no-context unit tests with Mockito,
-ArchUnit layer checks, PostgreSQL 18.4 Testcontainers migration and API integration tests,
-generated-OpenAPI assertions, and Palantir formatting checks. Docker must be available; no tests
-or checks are skipped. Reports are in `target/surefire-reports` and `target/failsafe-reports`.
+ArchUnit layer checks, PostgreSQL 18.4 and Kafka 4.3.1 Testcontainers integration tests,
+migration/API/generated-OpenAPI assertions, and Palantir formatting checks. Docker must be
+available; no tests or checks are skipped. Reports are in `target/surefire-reports` and
+`target/failsafe-reports`.
 
 If Spotless reports differences:
 

@@ -23,5 +23,7 @@ public abstract class PostgresIntegrationTest {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", () -> RESERVATION_USERNAME);
         registry.add("spring.datasource.password", () -> RESERVATION_PASSWORD);
+        registry.add("reservation.cancellation.relay.enabled", () -> "false");
+        registry.add("reservation.cancellation.cleanup.enabled", () -> "false");
     }
 }

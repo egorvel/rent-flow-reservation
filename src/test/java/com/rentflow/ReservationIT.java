@@ -35,12 +35,14 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCreationFailure;
 import com.rentflow.model.ReservationStatus;
+import com.rentflow.repository.ReservationCancellationOutboxRepository;
 import com.rentflow.repository.ReservationCreationRequestRepository;
 import com.rentflow.repository.ReservationRepository;
 import com.rentflow.service.InventoryGateway;
 import com.rentflow.service.InventoryGateway.ClaimResult;
 import com.rentflow.service.InventoryProtocolException;
 import com.rentflow.service.InventoryServiceUnavailableException;
+import com.rentflow.service.ReservationCancellationService;
 import com.rentflow.service.ReservationCreationCleanupService;
 import com.rentflow.support.PostgresIntegrationTest;
 
@@ -54,6 +56,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -90,6 +93,12 @@ class ReservationIT extends PostgresIntegrationTest {
     private ReservationCreationRequestRepository creationRequestRepository;
 
     @Autowired
+    private ReservationCancellationOutboxRepository cancellationOutboxRepository;
+
+    @Autowired
+    private ReservationCancellationService cancellationService;
+
+    @Autowired
     private ApplicationContext applicationContext;
 
     @Autowired
@@ -106,6 +115,7 @@ class ReservationIT extends PostgresIntegrationTest {
 
     @BeforeEach
     void clearReservations() {
+        cancellationOutboxRepository.deleteAllInBatch();
         creationRequestRepository.deleteAllInBatch();
         repository.deleteAllInBatch();
         reset(inventoryGateway);
@@ -125,6 +135,85 @@ class ReservationIT extends PostgresIntegrationTest {
         assertThat(read(id.toString())).isEqualTo(created);
         assertThat(repository.findById(id).orElseThrow().getTimestamp().getNano() % 1000)
                 .isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HELD", "CONFIRMED"})
+    void cancelsEligibleReservationAndCommitsOneOutboxEvent(String initialStatus) throws Exception {
+        Reservation reservation = new Reservation(
+                "CANCEL-001", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3));
+        reservation.changeStatus(ReservationStatus.valueOf(initialStatus));
+        Reservation saved = repository.saveAndFlush(reservation);
+
+        mvc.perform(post(PATH + "/" + saved.getId() + "/cancel"))
+                .andExpect(status().isNoContent())
+                .andExpect(content().bytes(new byte[0]));
+
+        assertThat(repository.findById(saved.getId()).orElseThrow().getStatus()).isEqualTo(ReservationStatus.CANCELLED);
+        assertThat(cancellationOutboxRepository.findAll()).singleElement().satisfies(outbox -> {
+            assertThat(outbox.getRecordKey()).isEqualTo("CANCEL-001");
+            assertThat(outbox.getPayload()).contains("\"eventType\":\"ReservationCancelled\"");
+            assertThat(outbox.getPayload()).doesNotContain("reservationId");
+        });
+        verify(inventoryGateway, never()).claim(any(), any());
+    }
+
+    @Test
+    void repeatedCancellationIsAnEmptyNoOpWithoutAnotherEvent() throws Exception {
+        Reservation reservation = repository.saveAndFlush(new Reservation(
+                "CANCEL-NOOP", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3)));
+
+        for (int request = 0; request < 2; request++) {
+            mvc.perform(post(PATH + "/" + reservation.getId() + "/cancel"))
+                    .andExpect(status().isNoContent())
+                    .andExpect(content().bytes(new byte[0]));
+        }
+
+        assertThat(cancellationOutboxRepository.count()).isOne();
+    }
+
+    @Test
+    void cancellationRejectsMissingAndMalformedIdentifiersWithoutWrites() throws Exception {
+        UUID missing = UUID.randomUUID();
+
+        mvc.perform(post(PATH + "/" + missing + "/cancel"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("RESERVATION_NOT_FOUND"));
+        mvc.perform(post(PATH + "/not-a-uuid/cancel"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+
+        assertThat(cancellationOutboxRepository.count()).isZero();
+        assertThat(repository.count()).isZero();
+    }
+
+    @Test
+    void concurrentCancellationCreatesOneLogicalEvent() throws Exception {
+        Reservation reservation = repository.saveAndFlush(new Reservation(
+                "CANCEL-RACE", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3)));
+        int requests = 8;
+        CountDownLatch ready = new CountDownLatch(requests);
+        CountDownLatch start = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newFixedThreadPool(requests)) {
+            List<Future<Void>> futures = new ArrayList<>();
+            for (int request = 0; request < requests; request++) {
+                futures.add(executor.submit(() -> {
+                    ready.countDown();
+                    start.await(5, TimeUnit.SECONDS);
+                    cancellationService.cancel(reservation.getId());
+                    return null;
+                }));
+            }
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            for (Future<Void> future : futures) {
+                future.get(10, TimeUnit.SECONDS);
+            }
+        }
+
+        assertThat(repository.findById(reservation.getId()).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.CANCELLED);
+        assertThat(cancellationOutboxRepository.count()).isOne();
     }
 
     @Test
