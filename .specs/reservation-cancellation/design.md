@@ -6,19 +6,21 @@ Status: Design resolved; implementation tasks documented.
 
 ### 1.1 Design boundary
 
-This feature adds `POST /api/v1/reservations/{id}/cancel`, an atomic local cancellation and a
-transactional-outbox producer for Inventory's implemented `ReservationCancelled` Kafka contract.
-The request commits a Reservation status change and an outbox event together, then returns without
-calling Inventory or waiting for Kafka. A scheduled relay later publishes the persisted event.
+This feature adds `POST /api/v1/reservations/{id}/cancel` and automatic expiration of temporary
+holds, with both paths using one atomic local cancellation and transactional-outbox producer for
+Inventory's implemented `ReservationCancelled` Kafka contract. A manual request or timed worker
+commits a Reservation status change and an outbox event together without calling Inventory or
+waiting for Kafka. A scheduled relay later publishes the persisted event.
 
 The design uses a PostgreSQL-polled outbox rather than CDC. It does not add Debezium, a schema
 registry, a Kafka transaction, an Inventory HTTP call, an Inventory result event, or a distributed
 transaction. Kafka publication is at least once; Inventory's durable inbox supplies the
 effectively-once lifecycle effect for a stable event identifier.
 
-The guarantees apply only to the new cancel operation. Existing replacement and hard deletion stay
-unchanged, including their ability to bypass the event path. Coordination between cancellation and
-those legacy mutations is explicitly outside this increment.
+The guarantees apply only to the cancel operation and automatic hold expiration. Existing
+replacement and hard deletion stay unchanged, including their ability to bypass or undo the event
+path. Coordination between those legacy mutations and cancellation remains explicitly outside
+this increment.
 
 ### 1.2 Resolved design decisions
 
@@ -37,6 +39,11 @@ those legacy mutations is explicitly outside this increment.
 | Cleanup | Unpublished rows indefinite; acknowledged rows retained for 30 days |
 | Topic provisioning | Reservation creates the source topic only for local/test use; production is external |
 | Health | Kafka is excluded from readiness; backlog and failures are operational signals |
+| Hold lifetime | Immutable per-reservation deadline; ten-minute default applied at creation |
+| Expiration | Five-second database polling; expire only rows that are still `HELD` |
+| Expiration coordination | Transaction-scoped PostgreSQL advisory lock plus one row lock per transaction |
+| Expiration bounds | At most 100 transitions and five seconds per scheduled invocation |
+| Expiration event | Reuse the unchanged version-1 cancellation event and outbox path |
 
 ### 1.3 Runtime components
 
@@ -55,11 +62,18 @@ ReservationCancellationOutboxRelayScheduledService [fixed-delay polling]
 ReservationCancellationOutboxCleanupScheduledService [daily]
   -> ReservationCancellationOutboxCleanupService [bounded chunks]
        -> ReservationCancellationOutboxRepository
+
+ReservationHoldExpirationScheduledService [five-second fixed delay]
+  -> ReservationCancellationService.expireOldestHeld [one REQUIRES_NEW transaction]
+       -> ReservationRepository [cluster advisory lock + oldest eligible row lock]
+       -> ReservationCancellationOutboxRepository [PostgreSQL time + insert]
 ```
 
 - `ReservationController` owns HTTP/OpenAPI mapping and returns an empty `204` response.
 - `ReservationCancellationService` owns row locking, state transition, event construction,
-  one-time serialization, and atomic outbox persistence.
+  one-time serialization, atomic outbox persistence, and one timed-expiration attempt.
+- `ReservationHoldExpirationScheduledService` owns only bounded drain orchestration and expiration
+  telemetry; it does not duplicate transition or event logic.
 - `ReservationCancellationOutbox` is the JPA entity for immutable event data plus mutable delivery
   metadata.
 - `ReservationCancellationOutboxRepository` owns PostgreSQL time, advisory locking, FIFO selection,
@@ -149,8 +163,10 @@ cancellation remains outside scope as recorded in §2.4.
 ### 2.4 Legacy mutation paths
 
 `PUT /api/v1/reservations/{id}` continues to replace all mutable fields and can set status to
-`CANCELLED` without an outbox event. `DELETE /api/v1/reservations/{id}` continues to hard-delete a
-reservation without an event. Their request, response, validation, and persistence behavior do not
+`CANCELLED` or restore `HELD` without an outbox event. It preserves the immutable original
+`holdExpiresAt`; consequently, restoring `HELD` after that deadline makes the row eligible for a
+later expiration run. `DELETE /api/v1/reservations/{id}` continues to hard-delete a reservation
+without an event. Their request, response, validation, and persistence behavior otherwise do not
 change.
 
 The outbox has no foreign key to `reservations`. Consequently, an event committed by the new cancel
@@ -263,13 +279,14 @@ time are non-updatable after construction. Its behavior methods only:
 
 The entity retains the last failure metadata after a later success for operational diagnosis.
 
-`ReservationCancellationOutboxRepository` extends `JpaRepository` and adds narrowly scoped native
-queries for:
+`ReservationCancellationOutboxRepository` extends `JpaRepository` and prefers Spring Data derived
+queries for selections/counts, JPQL for the minimum occurrence time, and narrowly scoped native
+queries only for PostgreSQL-specific operations:
 
 - `clock_timestamp()`;
 - the fixed `pg_try_advisory_xact_lock` relay lock;
-- the oldest unpublished row under `FOR UPDATE`;
-- pending count and oldest pending age using PostgreSQL time; and
+- the oldest unpublished row under `FOR UPDATE` (derived query plus `@Lock`);
+- pending count (derived query) and oldest pending age using PostgreSQL time; and
 - chunked acknowledged-row cleanup using `FOR UPDATE SKIP LOCKED`.
 
 Spring Data locking supplies `findForUpdateById` on `ReservationRepository`. Java local variables
@@ -542,7 +559,10 @@ Unit tests cover:
 - identical persisted key/value use on every relay attempt;
 - failed-attempt classification and exponential-backoff bounds, saturation, and jitter range;
 - scheduler drain stopping on empty, ineligible, lock-busy, failure, count, and runtime limits; and
-- entity delivery-state transitions without weakening assertions or sleeping.
+- entity delivery-state transitions without weakening assertions or sleeping;
+- timed-expiration eligibility, shared cancellation event construction, and scheduler count,
+  runtime, empty, lock-busy, and failure stop conditions; and
+- positive hold-duration configuration and immutable deadline calculation.
 
 Mockito is used for repositories, KafkaTemplate, metrics, and time/result collaborators where
 needed. No unit test starts Spring or Docker.
@@ -558,8 +578,14 @@ PostgreSQL 18.4 Testcontainers tests cover:
 - forced rollback leaves both reservation and outbox unchanged;
 - concurrent cancel calls produce one outbox row;
 - advisory lock exclusion and oldest-row FIFO selection;
-- pending/backlog queries use PostgreSQL time; and
-- cleanup deletes only published rows older than 30 days in bounded chunks.
+- pending/backlog queries use PostgreSQL time;
+- cleanup deletes only published rows older than 30 days in bounded chunks;
+- V4 deadline column, check, partial eligibility index, reservation backfill, and successful
+  creation-ledger JSON backfill;
+- PostgreSQL-time deadline assignment for a creation batch;
+- oldest-due selection, advisory-lock exclusion, bounded catch-up after restart, and non-eligible
+  `CONFIRMED`/`CANCELLED` rows; and
+- manual-versus-timed cancellation races producing one transition and one outbox row.
 
 Tests remain isolated to the `reservation` schema and do not access Inventory tables.
 
@@ -583,7 +609,9 @@ sleep increases.
 
 HTTP integration tests cover `204` for both transition and no-op, `404`, malformed UUID `400`, an
 empty response body, no required idempotency header/body, and unchanged legacy PUT/DELETE behavior.
-OpenAPI tests verify the operation and eventual-consistency description. ArchUnit continues to
+They also cover the required read-only `holdExpiresAt` across creation, replay, get, list, and
+replacement responses, rejection in input, and preservation across state changes. OpenAPI tests
+verify the operation, deadline schema, and eventual-consistency description. ArchUnit continues to
 enforce the existing layers and package suffixes.
 
 README/service documentation covers the endpoint, event/topic contract, outbox/inbox boundary,
@@ -615,3 +643,106 @@ Kafka where required.
 | AC4.4 | §1.1, §4.1, §7.1 |
 | AC4.5 | §2.4 |
 | AC4.6 | §6–§8, §11.4 |
+| AC5.1 | §13.1, §13.5 |
+| AC5.2–AC5.6 | §13.3–§13.4 |
+| AC5.7–AC5.8 | §13.5 |
+| AC5.9 | §13.1 |
+| AC5.10 | §13.2 |
+| AC5.11 | §13.4, §13.6 |
+
+## 13. Automatic hold expiration
+
+### 13.1 Immutable deadline and configuration
+
+`Reservation` gains a non-updatable `Instant holdExpiresAt` mapped to
+`reservation.reservations.hold_expires_at timestamptz(6) NOT NULL`. A validated positive
+`reservation.cancellation.expiration.hold-duration` controls new reservations and defaults to
+`10m`. The creation transaction samples PostgreSQL `clock_timestamp()` once immediately before
+inserting a successful batch. Every row in that batch uses that value for `created_at` and the
+value plus the configured duration for `hold_expires_at`, so all items have the exact durable
+relationship and one consistent deadline basis.
+
+The deadline never changes when status changes. Updating configuration affects only batches
+created after the change; no startup job rewrites existing rows. Persisted timestamps retain
+microsecond precision through PostgreSQL.
+
+### 13.2 Append-only V4 migration and backfill
+
+`V4__add_reservation_hold_expiration.sql` adds the deadline without modifying V1–V3. It first adds
+the nullable column, backfills every reservation as `created_at + INTERVAL '10 minutes'`, then
+sets `NOT NULL` and adds `CHECK (hold_expires_at > created_at)`. A partial index ordered by
+`(hold_expires_at, id) WHERE status = 'HELD'` supports the worker.
+
+Successful idempotency-ledger outcomes (`http_status = 201`) contain the stored array of
+reservation snapshots. The same migration updates each JSON array element with a string
+`holdExpiresAt` calculated from its stored `timestamp + 10 minutes`; this also covers a successful
+snapshot whose reservation was later hard-deleted. The value equals the corresponding reservation
+backfill when that row still exists. This preserves representation-level replay semantics after
+deployment: an old key replays the now-current public shape. Non-success outcomes are unchanged.
+Existing HELD rows whose backfilled deadline is already past become eligible on the next worker
+run.
+
+### 13.3 One expiration transaction and concurrency
+
+`ReservationCancellationService.expireOldestHeld()` uses `REQUIRES_NEW` and performs one attempt:
+
+1. Try a fixed transaction-scoped PostgreSQL advisory lock dedicated to expiration. Return
+   `LOCK_BUSY` immediately if another instance owns it.
+2. Sample PostgreSQL `clock_timestamp()` and use a Spring Data derived repository method with
+   `PESSIMISTIC_WRITE` to select the first row ordered by `holdExpiresAt, id` whose status is
+   `HELD` and deadline is at or before that time.
+3. Return `EMPTY` if no row is eligible.
+4. Pass the locked entity and sampled database time to the same private transition helper used by
+   `cancel(UUID)`. The helper serializes and persists the unchanged five-field version-1 event,
+   changes status, and returns `EXPIRED`.
+
+One reservation and one outbox insert commit per transaction. Manual cancellation locks by ID;
+timed expiration locks the selected row. Under PostgreSQL `READ COMMITTED`, a contender observes
+the winner's committed `CANCELLED` state and cannot create a second event. A row confirmed before
+the expiration selection no longer matches `status = 'HELD'`. `occurredAt` is the actual database
+transition time, not `holdExpiresAt`.
+
+Legacy PUT and DELETE remain outside this coordination. In particular, PUT may restore `HELD`
+after cancellation; because it preserves the deadline, a later worker can cancel that resurrected
+row and emit another logical event. This is the accepted limitation recorded in §2.4.
+
+### 13.4 Scheduled drain and recovery
+
+`ReservationHoldExpirationScheduledService` is enabled by default through
+`reservation.cancellation.expiration.enabled` and runs with a configurable fixed delay whose
+default is `5s`. Each invocation repeatedly calls `expireOldestHeld()` until it receives `EMPTY`,
+`LOCK_BUSY`, or a failure, expires 100 reservations, or consumes its five-second runtime budget.
+The scheduler owns no transaction and uses `System.nanoTime()` only for the runtime bound.
+
+Each successful iteration commits independently. A process crash loses no deadline, and the next
+instance/run resumes from the oldest eligible row. A database failure rolls back the current
+transition and outbox record, records a bounded failure metric, logs no reservation identifiers,
+and leaves the row for a later run. Kafka availability is irrelevant to expiration because the
+transaction only appends to the existing outbox.
+
+### 13.5 API and creation-ledger representation
+
+`ReservationDTO` and `ReservationSnapshot` add required `Instant holdExpiresAt` immediately after
+`timestamp`. The converter includes it for create, replay, get, list, replace, confirmed, and
+cancelled responses. OpenAPI marks it `readOnly: true`, `required`, and `date-time`. Jackson's
+existing `FAIL_ON_IGNORED_PROPERTIES` behavior rejects the field in replacement input; creation
+input has no such member and continues to reject unknown fields. Replacement copies no deadline,
+so the stored value is preserved.
+
+Creation snapshots include the deadline before the outcome is written to the seven-day ledger.
+Replays return that stored deadline verbatim and never recalculate it from current configuration.
+
+### 13.6 Expiration telemetry
+
+Micrometer exposes only bounded metrics:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `reservation.cancellation.expiration.transitions` | Counter | Successfully committed timed cancellations |
+| `reservation.cancellation.expiration.failures` | Counter | Scheduled attempts ending in an unexpected failure |
+| `reservation.cancellation.expiration.overdue` | Gauge | Current count of `HELD` rows whose deadline has elapsed |
+| `reservation.cancellation.expiration.oldest.age` | Gauge | Seconds since the oldest overdue deadline; zero when empty |
+
+The scheduler refreshes gauges after every invocation from repository queries parameterized with
+PostgreSQL time. Metrics and warning logs contain no reservation, serial, customer, order, event,
+payload, or exception-message labels.

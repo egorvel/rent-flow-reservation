@@ -253,7 +253,7 @@ public class ReservationController {
             operationId = "replaceReservation",
             summary = "Fully replace reservation details and status",
             description =
-                    "Preserves ID and creation timestamp; requires every mutable field. Any status is accepted without transition rules. Does not create missing reservations.")
+                    "Preserves ID, creation timestamp, and hold deadline; requires every mutable field. Any status is accepted without transition rules. Does not create missing reservations.")
     @ApiResponses({
         @ApiResponse(responseCode = "200", description = "Reservation replaced."),
         @ApiResponse(
@@ -275,7 +275,7 @@ public class ReservationController {
     public ReservationDTO replace(
             @PathVariable UUID id,
             @io.swagger.v3.oas.annotations.parameters.RequestBody(
-                            description = "All six mutable fields; do not send ID or timestamp.",
+                            description = "All six mutable fields; do not send ID, timestamp, or holdExpiresAt.",
                             required = true,
                             content =
                                     @Content(

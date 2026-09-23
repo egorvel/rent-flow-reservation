@@ -129,12 +129,50 @@ class ReservationIT extends PostgresIntegrationTest {
         UUID id = UUID.fromString(created.path("id").asString());
         assertThat(created.propertyNames())
                 .containsExactlyInAnyOrder(
-                        "id", "serialNumber", "customerId", "orderId", "startDate", "endDate", "timestamp", "status");
+                        "id",
+                        "serialNumber",
+                        "customerId",
+                        "orderId",
+                        "startDate",
+                        "endDate",
+                        "timestamp",
+                        "holdExpiresAt",
+                        "status");
         assertThat(created.path("status").asString()).isEqualTo("HELD");
-        assertThat(Instant.parse(created.path("timestamp").asString())).isBetween(before, Instant.now());
+        Instant timestamp = Instant.parse(created.path("timestamp").asString());
+        assertThat(timestamp).isBetween(before, Instant.now());
+        assertThat(Instant.parse(created.path("holdExpiresAt").asString())).isEqualTo(timestamp.plusSeconds(600));
         assertThat(read(id.toString())).isEqualTo(created);
         assertThat(repository.findById(id).orElseThrow().getTimestamp().getNano() % 1000)
                 .isZero();
+    }
+
+    @Test
+    void oneSuccessfulBatchUsesOneDatabaseCreationTimeAndConfiguredDeadline() throws Exception {
+        String request = """
+                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                  {"serialNumber":"BATCH-001","startDate":"2026-10-01","endDate":"2026-10-03"},
+                  {"serialNumber":"BATCH-002","startDate":"2026-10-01","endDate":"2026-10-03"}
+                ]}
+                """;
+
+        JsonNode created = mapper.readTree(mvc.perform(post(PATH)
+                        .header("Idempotency-Key", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(request))
+                .andExpect(status().isCreated())
+                .andReturn()
+                .getResponse()
+                .getContentAsByteArray());
+
+        assertThat(created).hasSize(2);
+        Instant timestamp = Instant.parse(created.get(0).path("timestamp").asString());
+        Instant holdExpiresAt =
+                Instant.parse(created.get(0).path("holdExpiresAt").asString());
+        assertThat(holdExpiresAt).isEqualTo(timestamp.plusSeconds(600));
+        assertThat(created.get(1).path("timestamp")).isEqualTo(created.get(0).path("timestamp"));
+        assertThat(created.get(1).path("holdExpiresAt"))
+                .isEqualTo(created.get(0).path("holdExpiresAt"));
     }
 
     @ParameterizedTest
@@ -756,6 +794,7 @@ class ReservationIT extends PostgresIntegrationTest {
                 withStatus(CREATE, "HELD"),
                 CREATE.replace("}", ",\"id\":\"ef469102-af79-4a47-9afb-f34937c9481f\"}"),
                 CREATE.replace("}", ",\"timestamp\":\"2026-01-01T00:00:00Z\"}"),
+                CREATE.replace("}", ",\"holdExpiresAt\":\"2026-01-01T00:10:00Z\"}"),
                 CREATE.replace("}", ",\"unknown\":true}"));
     }
 
@@ -829,7 +868,9 @@ class ReservationIT extends PostgresIntegrationTest {
                 valid.replace("}", ",\"id\":null}"),
                 valid.replace("}", ",\"id\":\"ef469102-af79-4a47-9afb-f34937c9481f\"}"),
                 valid.replace("}", ",\"timestamp\":null}"),
-                valid.replace("}", ",\"timestamp\":\"2026-01-01T00:00:00Z\"}"));
+                valid.replace("}", ",\"timestamp\":\"2026-01-01T00:00:00Z\"}"),
+                valid.replace("}", ",\"holdExpiresAt\":null}"),
+                valid.replace("}", ",\"holdExpiresAt\":\"2026-01-01T00:10:00Z\"}"));
     }
 
     @Test

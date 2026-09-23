@@ -11,6 +11,13 @@ release the associated item. The public operation is
 successful response reports only the Reservation-side outcome: Inventory can continue to report
 the item as `RESERVED` until it consumes the cancellation event.
 
+Temporary holds also need a durable lifetime. Every newly created `HELD` reservation receives an
+immutable `holdExpiresAt` deadline ten minutes after its database-sourced creation time. A
+database-backed worker cancels reservations that are still `HELD` when that deadline is reached,
+using the same atomic transition and version-1 outbox event as the public cancel operation. The
+deadline is returned by the public API so clients can present the hold lifetime without deriving
+it from local clocks.
+
 A reservation in `HELD` or `CONFIRMED` transitions to `CANCELLED`. The transition and one durable
 outbox record commit in the same Reservation-owned PostgreSQL transaction. An already `CANCELLED`
 reservation is a successful idempotent no-op that creates no further event. Concurrent calls to
@@ -29,9 +36,9 @@ reason. This contract matches Inventory's implemented consumer in
 `rent-flow-inventory/.specs/async-reservation-cancellation`.
 
 The existing full-replacement and hard-delete operations remain unchanged temporarily. They can
-therefore still set `CANCELLED` or remove a reservation without producing a cancellation event.
-Closing those bypasses is planned separately; the guarantees in this feature apply only to the new
-cancel operation.
+therefore still set `CANCELLED`, restore another status, or remove a reservation without producing
+a cancellation event. Closing those bypasses is planned separately; the guarantees in this
+feature apply to the cancel operation and automatic hold expiration only.
 
 ### Integration boundary
 
@@ -91,7 +98,8 @@ committed cancellation cannot be lost between PostgreSQL and Kafka.
 - **AC2.6 (Ubiquitous):** The reservation service shall use the UTF-8 encoding of the event's exact
   `serialNumber` as its Kafka record key and shall not include a `reservationId` in the event.
 - **AC2.7 (Unwanted):** If an operation does not commit a `HELD`-to-`CANCELLED` or
-  `CONFIRMED`-to-`CANCELLED` transition through the cancel endpoint, then the reservation service
+  `CONFIRMED`-to-`CANCELLED` transition through the cancel endpoint or a
+  `HELD`-to-`CANCELLED` transition through automatic hold expiration, then the reservation service
   shall create no cancellation outbox record for that operation.
 
 ### US3 — Publish committed cancellation events reliably
@@ -143,12 +151,56 @@ access.
   eventual-consistency boundary, at-least-once delivery, version-1 event contract, topic policy,
   and operational recovery assumptions.
 
+### US5 — Expire temporary holds automatically
+
+As a reservation client, I want an unconfirmed hold to be cancelled after its advertised lifetime
+so that Inventory can eventually make the item available again without a manual request.
+
+- **AC5.1 (Event-driven):** When the reservation service creates a successful batch of `HELD`
+  reservations, the reservation service shall persist one immutable `holdExpiresAt` per
+  reservation equal to the batch's PostgreSQL `clock_timestamp()` creation time plus the
+  configured hold duration, whose default is ten minutes.
+- **AC5.2 (Event-driven):** When a reservation's `holdExpiresAt` is at or before PostgreSQL time and
+  its status is still `HELD`, the reservation service shall change it to `CANCELLED` and persist
+  exactly one version-1 cancellation outbox record in the same local transaction.
+- **AC5.3 (State-driven):** While the expiration worker is enabled, healthy, and free of an older
+  expiration backlog, the reservation service shall poll every five seconds and begin processing
+  an eligible hold no later than the next poll.
+- **AC5.4 (Unwanted):** If a reservation is `CONFIRMED` or `CANCELLED` when the expiration worker
+  evaluates it, then the reservation service shall not change it or create a cancellation outbox
+  record for that evaluation.
+- **AC5.5 (Event-driven):** When manual cancellation and automatic expiration race for the same
+  `HELD` reservation, the reservation service shall commit exactly one transition to `CANCELLED`
+  and exactly one logical cancellation event.
+- **AC5.6 (Event-driven):** When an instance starts after one or more persisted HELD deadlines have
+  elapsed, the reservation service shall make those overdue reservations eligible for bounded
+  catch-up without reconstructing in-memory timers.
+- **AC5.7 (Ubiquitous):** The reservation service shall expose `holdExpiresAt` as a required,
+  read-only UTC date-time in reservation creation, retrieval, list, replacement, and idempotent
+  creation-replay responses, and shall preserve it after confirmation or cancellation.
+- **AC5.8 (Unwanted):** If a create or replacement request supplies `holdExpiresAt`, then the
+  reservation service shall reject the ignored server-managed field through the existing invalid
+  request response and shall not use the supplied value.
+- **AC5.9 (Event-driven):** When the hold duration configuration changes, the reservation service
+  shall apply the new positive duration only to reservations created afterward and shall not
+  rewrite existing persisted deadlines.
+- **AC5.10 (Event-driven):** When the deadline migration is applied to existing data, the
+  reservation service shall backfill every reservation with `created_at + 10 minutes`, add the same
+  value to every stored successful creation response, and make already-overdue `HELD` rows
+  eligible for the worker.
+- **AC5.11 (Ubiquitous):** The reservation service shall coordinate expiration across instances,
+  process at most 100 reservations within a five-second runtime budget per scheduled run, and
+  expose bounded transition, failure, overdue-count, and oldest-overdue-age telemetry.
+
 ## Out of scope
 
 - Cancelling multiple reservations or every reservation belonging to an order in one request.
 - Requiring an idempotency key or maintaining a cancellation response ledger.
 - Accepting or persisting a cancellation reason, actor, comment, or other cancellation metadata.
 - Adding a `cancelledAt` field to the public reservation representation.
+- Changing the version-1 event to distinguish manual cancellation from hold expiration.
+- Expiring `CONFIRMED` reservations or extending a deadline when a hold is confirmed.
+- Offering an endpoint that changes or renews `holdExpiresAt`.
 - Removing or changing the existing hard-delete operation.
 - Preventing the existing full-replacement operation from setting status to `CANCELLED`.
 - Coordinating the cancel operation with concurrent legacy replacement or hard-delete requests.
@@ -187,3 +239,20 @@ access.
 7. **Operations and health.** Keep Kafka outside readiness so the outbox can buffer outages; expose
    bounded publication, retry, pending-age, and cleanup telemetry without payloads or
    high-cardinality metric labels. See `design.md` §8.
+8. **Expiration eligibility.** Expire only reservations that are still `HELD` at their persisted
+   deadline; leave `CONFIRMED` and `CANCELLED` rows unchanged. See `design.md` §13.3.
+9. **Deadline persistence.** Store an immutable `hold_expires_at` for every reservation rather
+   than reconstructing timers or deriving eligibility at runtime. See `design.md` §13.1–§13.2.
+10. **Expiration cadence.** Poll every five seconds and bound each run to 100 transitions and five
+    seconds; normal no-backlog lateness is therefore one polling interval. See `design.md` §13.4.
+11. **Public contract.** Return required read-only `holdExpiresAt` in every reservation
+    representation and reject it in requests under the existing strict ignored-field handling.
+    See `design.md` §13.5.
+12. **Legacy replacement.** Preserve the existing PUT behavior, including its ability to resurrect
+    a cancelled reservation while retaining the original deadline. See `design.md` §2.4 and
+    §13.3.
+13. **Event compatibility.** Reuse the unchanged five-field version-1 `ReservationCancelled`
+    record for timed expiration; do not add a reason or a new topic. See `design.md` §3 and §13.3.
+14. **Existing data.** Backfill deadlines from `created_at + 10 minutes` and successful creation
+    ledger representations in an append-only migration; overdue HELD rows become immediately
+    eligible. See `design.md` §13.2.

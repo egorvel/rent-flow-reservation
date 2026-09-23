@@ -98,14 +98,15 @@ class MigrationIT extends PostgresIntegrationTest {
         assertThat(saved.getTimestamp().getNano() % 1000).isZero();
         assertThat(flyway.migrate().migrationsExecuted).isZero();
         assertThat(jdbc.queryForObject(
-                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2', '3') AND success",
+                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2', '3', '4') AND success",
                         Integer.class))
-                .isEqualTo(3);
+                .isEqualTo(4);
         try (ConfigurableApplicationContext context = start(Map.of())) {
             Reservation restored = context.getBean(ReservationRepository.class)
                     .findById(saved.getId())
                     .orElseThrow();
             assertThat(restored.getTimestamp()).isEqualTo(saved.getTimestamp());
+            assertThat(restored.getHoldExpiresAt()).isEqualTo(saved.getHoldExpiresAt());
             assertThat(restored.getSerialNumber()).isEqualTo("RESTART-001");
         }
     }
@@ -252,7 +253,10 @@ class MigrationIT extends PostgresIntegrationTest {
         assertThat(jdbc.queryForList(
                         "SELECT indexname FROM pg_indexes WHERE schemaname = 'reservation' AND tablename = 'reservations'",
                         String.class))
-                .containsExactlyInAnyOrder("reservations_pkey", "idx_reservations_creation_active_lookup");
+                .containsExactlyInAnyOrder(
+                        "reservations_pkey",
+                        "idx_reservations_creation_active_lookup",
+                        "idx_reservations_held_expiration");
         insert("DUPLICATE-001", "CUSTOMER-1", "ORDER-1", "2026-10-01", "2026-10-03", "HELD");
         insert("DUPLICATE-001", "CUSTOMER-1", "ORDER-1", "2026-10-01", "2026-10-03", "HELD");
         assertThat(jdbc.queryForObject(
@@ -265,6 +269,10 @@ class MigrationIT extends PostgresIntegrationTest {
         assertInvalid("A", "C", "O", "2026-10-03", "2026-10-01", "HELD");
         assertInvalid("A", "C", "O", "10000-01-01", "10000-01-02", "HELD");
         assertInvalid("A", "C", "O", "2026-10-01", "2026-10-03", "EXPIRED");
+        assertThatThrownBy(() -> jdbc.update(
+                        "INSERT INTO reservation.reservations (id, serial_number, customer_id, order_id, start_date, end_date, created_at, hold_expires_at, status) VALUES (?, 'DEADLINE-001', 'C', 'O', DATE '2026-10-01', DATE '2026-10-03', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'HELD')",
+                        UUID.randomUUID()))
+                .isInstanceOf(DataIntegrityViolationException.class);
     }
 
     @Test
@@ -348,7 +356,7 @@ class MigrationIT extends PostgresIntegrationTest {
 
     private void insert(String serial, String customer, String order, String start, String end, String status) {
         jdbc.update(
-                "INSERT INTO reservation.reservations (id, serial_number, customer_id, order_id, start_date, end_date, created_at, status) VALUES (?, ?, ?, ?, ?::date, ?::date, CURRENT_TIMESTAMP, ?)",
+                "INSERT INTO reservation.reservations (id, serial_number, customer_id, order_id, start_date, end_date, created_at, hold_expires_at, status) VALUES (?, ?, ?, ?, ?::date, ?::date, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '10 minutes', ?)",
                 UUID.randomUUID(),
                 serial,
                 customer,

@@ -4,8 +4,9 @@ Reservation CRUD with atomic, idempotent batch creation, asynchronous cancellati
 Swagger documentation, Flyway migrations, PostgreSQL persistence, Inventory integration, health
 probes, container packaging, and automated verification. Creation assigns `HELD`, rejects a
 second active reservation for an item, and atomically claims every item as `RESERVED` through
-Inventory. Cancellation uses a transactional outbox to release the item through Kafka without
-making the HTTP request wait for Inventory.
+Inventory. Every hold has a durable ten-minute deadline and is cancelled automatically if it is
+still `HELD` when that deadline passes. Manual and timed cancellation use the same transactional
+outbox to release the item through Kafka without making an HTTP request wait for Inventory.
 
 The implementation follows the sibling Pricing service's MVC layers, DTO/converter pattern,
 Problem Details errors, page envelope, build checks, and schema ownership conventions.
@@ -68,6 +69,7 @@ administrator. Override local settings through environment variables or a gitign
 | RESERVATION_DB_PASSWORD | reservation-local | Local reservation role password |
 | KAFKA_BOOTSTRAP_SERVERS | localhost:9092 | Kafka bootstrap address for cancellation publication |
 | RESERVATION_CANCELLATION_TOPIC | rentflow.reservation.cancelled.v1 | Version-1 source topic |
+| RESERVATION_CANCELLATION_EXPIRATION_HOLD_DURATION | 10m | Lifetime assigned to newly created holds |
 
 ## Run Java locally
 
@@ -126,7 +128,7 @@ startup if the datasource, required schema, Flyway migration, or Hibernate valid
 
 The API is unauthenticated in this increment and accepts JSON. It returns a generated UUID `id`,
 client-assigned `serialNumber`, `customerId`, `orderId`, inclusive `startDate`/`endDate`, immutable
-UTC creation `timestamp` (microsecond precision), and `status`.
+UTC creation `timestamp` and `holdExpiresAt` deadline (microsecond precision), and `status`.
 
 Customer/order IDs are case-sensitive, nonblank strings up to 64 characters. Creation delegates
 serial-number validity and existence to Inventory. Dates use `YYYY-MM-DD`, years 0001–9999, with
@@ -144,8 +146,8 @@ row ends today or later. Outdated and `CANCELLED` rows do not block creation.
 | DELETE | /api/v1/reservations/{id} | 204 permanent deletion |
 
 PUT requires all five client-assigned detail fields plus `status` (`HELD`, `CONFIRMED`, or
-`CANCELLED`). It preserves ID/timestamp and never inserts a missing reservation. There are no
-status-transition restrictions yet. POST requires a canonical UUID-v4 `Idempotency-Key` and an
+`CANCELLED`). It preserves ID, timestamp, and `holdExpiresAt` and never inserts a missing
+reservation. There are no status-transition restrictions yet. POST requires a canonical UUID-v4 `Idempotency-Key` and an
 envelope containing common `customerId`/`orderId` plus 1–100 unique item serials and periods. It
 returns no `Location` header. Unknown properties are rejected. Missing item GET/PUT/DELETE returns
 404. PATCH is unsupported.
@@ -162,6 +164,20 @@ request media 415, and unexpected failures a sanitized 500. Swagger describes sc
 `204` no-op. A missing reservation returns `404 RESERVATION_NOT_FOUND`, and a malformed UUID
 returns `400 VALIDATION_FAILED`. Existing PUT and DELETE behavior remains unchanged and can still
 bypass event publication in this increment.
+
+Successful creation samples PostgreSQL time once for the whole batch. Each new reservation stores
+that value as `timestamp` and stores `holdExpiresAt` using the configured hold duration (ten
+minutes by default). A database-backed worker polls every five seconds and cancels the oldest due
+reservation only if it is still `HELD`. `CONFIRMED` and `CANCELLED` rows are left unchanged.
+Deadlines survive restarts and configuration changes; a new duration applies only to reservations
+created afterward. Each expiration commits independently, with at most 100 transitions and five
+seconds of work per run.
+
+Timed expiration uses the same row locking, five-field version-1 event, and atomic outbox write as
+manual cancellation. PostgreSQL advisory locking coordinates multiple service instances. A race
+between the endpoint and the worker therefore creates one transition and one event. Legacy PUT
+remains unrestricted: restoring an expired reservation to `HELD` preserves its original deadline
+and makes it eligible for a later expiration run.
 
 The status transition and one `reservation_cancellation_outbox` row commit in the same local
 transaction. The response does not call Inventory, wait for Kafka, or mean that Inventory has
@@ -199,7 +215,11 @@ the same event ID. There is no automatic replay or administrative replay endpoin
 Operational metrics are `reservation.cancellation.outbox.publish.attempts`,
 `reservation.cancellation.outbox.retries.scheduled`, `reservation.cancellation.outbox.pending`,
 `reservation.cancellation.outbox.oldest.age`, and the
-`reservation.cancellation.outbox.cleanup.*` family. Labels and logs exclude serial numbers,
+`reservation.cancellation.outbox.cleanup.*` family. Expiration adds
+`reservation.cancellation.expiration.transitions`,
+`reservation.cancellation.expiration.failures`,
+`reservation.cancellation.expiration.overdue`, and
+`reservation.cancellation.expiration.oldest.age`. Labels and logs exclude serial numbers,
 payloads, exception messages, and customer/order data.
 
 ## Try every operation

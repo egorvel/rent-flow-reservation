@@ -2,9 +2,10 @@
 
 Status: Approved for implementation.
 
-Each task is one safe commit in the named repository. T1–T6 belong to
-`rent-flow-reservation`; T7 belongs to `rent-flow-common`. The specification self-evaluation is a
-local verification artifact and is not included in either repository's implementation commits.
+Each task is one safe commit in the named repository. T1–T7 describe the implemented manual
+cancellation baseline. T8–T9 belong to `rent-flow-reservation`; T10 belongs to
+`rent-flow-common`. The specification self-evaluation is a local verification artifact and is not
+included in either repository's implementation commits.
 
 The dependency graph is:
 
@@ -17,11 +18,14 @@ graph LR
     T4 --> T5
     T5 --> T6
     T6 --> T7
+    T7 --> T8
+    T8 --> T9
+    T9 --> T10
 ```
 
 ## T1 — Configure the Kafka producer and source topic
 
-**State:** Pending.
+**State:** Complete.
 
 **Repository:** `rent-flow-reservation`.
 
@@ -59,7 +63,7 @@ graph LR
 
 ## T2 — Add the immutable cancellation outbox
 
-**State:** Pending.
+**State:** Complete.
 
 **Repository:** `rent-flow-reservation`.
 
@@ -97,7 +101,7 @@ graph LR
 
 ## T3 — Implement the atomic cancellation command
 
-**State:** Pending.
+**State:** Complete.
 
 **Repository:** `rent-flow-reservation`.
 
@@ -142,7 +146,7 @@ AC3.6, AC4.3–AC4.5; design.md §1.3, §2–§4, §9, §11.1–§11.2.
 
 ## T4 — Relay outbox events with durable FIFO retry
 
-**State:** Pending.
+**State:** Complete.
 
 **Repository:** `rent-flow-reservation`.
 
@@ -192,7 +196,7 @@ AC3.6, AC4.3–AC4.5; design.md §1.3, §2–§4, §9, §11.1–§11.2.
 
 ## T5 — Expose the cancellation HTTP contract
 
-**State:** Pending.
+**State:** Complete.
 
 **Repository:** `rent-flow-reservation`.
 
@@ -235,7 +239,7 @@ AC3.6, AC4.3–AC4.5; design.md §1.3, §2–§4, §9, §11.1–§11.2.
 
 ## T6 — Add retention cleanup and the operating runbook
 
-**State:** Pending.
+**State:** Complete.
 
 **Repository:** `rent-flow-reservation`.
 
@@ -276,7 +280,7 @@ AC3.6, AC4.3–AC4.5; design.md §1.3, §2–§4, §9, §11.1–§11.2.
 
 ## T7 — Wire the common stack and verify the end-to-end flow
 
-**State:** Pending.
+**State:** Complete.
 
 **Repository:** `rent-flow-common`.
 
@@ -325,6 +329,115 @@ AC4.1–AC4.6; design.md §7.2, §9, §11.3–§11.4.
 - The final spec self-evaluation has no `FAIL` item; its timestamped report remains an uncommitted
   local validation artifact as requested.
 
+## T8 — Persist and expose immutable hold deadlines
+
+**State:** Complete.
+
+**Repository:** `rent-flow-reservation`.
+
+**Commit:** `feat: add reservation hold deadlines`
+
+**Depends on:** T7.
+
+**Refs.** requirements.md AC5.1, AC5.7–AC5.10; design.md §13.1–§13.2, §13.5,
+§11.2, §11.4.
+
+**Scope.**
+
+- Add append-only V4 with `hold_expires_at`, its invariant and partial HELD index, the
+  `created_at + 10 minutes` reservation backfill, and successful creation-ledger JSON backfill.
+- Add validated positive hold-duration configuration with a ten-minute default.
+- Sample one PostgreSQL time for each successful creation batch and persist it as `created_at`,
+  with the configured duration added for the immutable deadline.
+- Add required read-only `holdExpiresAt` to the JPA entity, DTO, snapshots, converters, OpenAPI,
+  and all stored/replayed successful creation outcomes while preserving it on legacy replacement.
+
+**DoD.**
+
+- Migration tests prove the non-null microsecond column, strict-after-creation check, partial
+  `(hold_expires_at, id) WHERE status = 'HELD'` index, ten-minute row backfill, successful ledger
+  backfill, and unchanged non-success outcomes.
+- Creation integration tests prove all rows in one batch share one PostgreSQL creation instant,
+  each deadline equals that instant plus the configured duration, and later configuration changes
+  do not rewrite existing rows.
+- HTTP and OpenAPI tests prove the required read-only date-time appears in create, replay, get,
+  list, replace, confirmed, and cancelled representations and is rejected in create/replace input.
+- Tests prove replacement and status transitions preserve the deadline, and old successful
+  idempotency keys replay the migrated value rather than recalculating it.
+- Configuration tests reject zero or negative hold durations and accept a positive override.
+- `mvn -B -ntp clean verify` reports `BUILD SUCCESS`.
+
+## T9 — Cancel expired HELD reservations in bounded transactions
+
+**State:** Complete.
+
+**Repository:** `rent-flow-reservation`.
+
+**Commit:** `feat: expire reservation holds automatically`
+
+**Depends on:** T8.
+
+**Refs.** requirements.md AC2.1–AC2.7, AC3.1–AC3.7, AC5.2–AC5.6, AC5.11;
+design.md §2.2–§2.4, §3, §5, §8, §9, §13.3–§13.6.
+
+**Scope.**
+
+- Add the Spring Data derived oldest-due HELD query with pessimistic locking and only the native
+  PostgreSQL operations required for database time and the fixed expiration advisory lock.
+- Extend `ReservationCancellationService` with one `REQUIRES_NEW` expiration attempt and a private
+  transition/outbox helper shared with manual cancellation.
+- Add the enabled-by-default five-second expiration scheduler with 100-transition and five-second
+  bounds, stopping on empty, lock-busy, or failure.
+- Add bounded expiration counters/gauges and payload/identifier-free warning logging.
+
+**DoD.**
+
+- Unit tests prove only due `HELD` rows expire, `CONFIRMED`/`CANCELLED` rows do not, occurrence time
+  is the transition time, and manual/timed paths serialize the identical version-1 event shape.
+- Scheduler tests prove the five-second default and every empty, lock-busy, failure, count, and
+  runtime stop condition without sleeping; configuration can disable the worker.
+- PostgreSQL tests prove oldest-deadline ordering, cluster advisory-lock exclusion, one row and
+  outbox per transaction, prompt restart catch-up, rollback recovery, and one event under a
+  manual-versus-expiration race.
+- Tests prove database and Kafka outages have the specified independent effects, a later run
+  retries database failures, and the existing relay publishes timed events unchanged.
+- Metrics expose only transition/failure counters and overdue-count/oldest-age gauges with bounded
+  dimensions and no business identifiers or exception text.
+- `mvn -B -ntp clean verify` reports `BUILD SUCCESS`.
+
+## T10 — Verify timed cancellation through the combined stack
+
+**State:** Complete.
+
+**Repository:** `rent-flow-common`.
+
+**Commit:** `test: verify automatic reservation expiration`
+
+**Depends on:** T9 and Inventory's implemented cancellation consumer.
+
+**Refs.** requirements.md AC5.2–AC5.7, AC5.10–AC5.11; design.md §7.2, §9,
+§11.3–§11.4, §13.2–§13.6.
+
+**Scope.**
+
+- Extend the combined smoke flow with an overdue HELD reservation without waiting ten real
+  minutes, then exercise Reservation expiration, outbox relay, Kafka, and Inventory's consumer.
+- Preserve the existing manual-cancellation smoke coverage and cross-service ownership checks.
+- Complete cross-repository verification and generate the spec self-evaluation locally without
+  committing its report.
+
+**DoD.**
+
+- The smoke test deterministically makes a HELD deadline overdue, waits for Reservation to change
+  it to `CANCELLED`, and verifies Inventory becomes `AVAILABLE` with one release/history effect.
+- The assertion uses the public service flow except for controlled test-time deadline setup and
+  does not sleep for the production ten-minute duration.
+- A confirmed reservation with an elapsed deadline remains confirmed and produces no release.
+- `./scripts/container-smoke-test.sh` reports `Combined container smoke verification passed` in
+  `rent-flow-common`.
+- `mvn -B -ntp clean verify` reports `BUILD SUCCESS` in `rent-flow-reservation`, and the final spec
+  self-evaluation contains no `FAIL`; the report stays uncommitted.
+
 ## Acceptance-criteria task traceability
 
 | Requirement | Implementation and verification task |
@@ -347,3 +460,7 @@ AC4.1–AC4.6; design.md §7.2, §9, §11.3–§11.4.
 | AC4.4 | T2–T4, T7 |
 | AC4.5 | T3, T5 |
 | AC4.6 | T6, T7 |
+| AC5.1 | T8 |
+| AC5.2–AC5.6 | T9 |
+| AC5.7–AC5.10 | T8 |
+| AC5.11 | T9, T10 |

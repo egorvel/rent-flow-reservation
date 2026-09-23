@@ -40,6 +40,7 @@ public class ReservationConverter {
                 reservation.getStartDate(),
                 reservation.getEndDate(),
                 reservation.getTimestamp(),
+                reservation.getHoldExpiresAt(),
                 reservation.getStatus().name());
     }
 }

@@ -12,4 +12,5 @@ public record ReservationSnapshot(
         LocalDate startDate,
         LocalDate endDate,
         Instant timestamp,
+        Instant holdExpiresAt,
         String status) {}

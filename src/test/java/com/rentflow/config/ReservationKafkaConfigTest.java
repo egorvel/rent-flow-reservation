@@ -18,7 +18,9 @@ class ReservationKafkaConfigTest {
                 new ReservationCancellationProperties.Relay(
                         Duration.ofSeconds(1), Duration.ofSeconds(5), 100, Duration.ofSeconds(50)),
                 new ReservationCancellationProperties.Retry(Duration.ofSeconds(1), 2, Duration.ofMinutes(5), 0.2),
-                new ReservationCancellationProperties.Cleanup("0 30 3 * * *", Duration.ofSeconds(60)));
+                new ReservationCancellationProperties.Cleanup("0 30 3 * * *", Duration.ofSeconds(60)),
+                new ReservationCancellationProperties.Expiration(
+                        true, Duration.ofMinutes(10), Duration.ofSeconds(5), Duration.ofSeconds(5), 100));
 
         NewTopic topic = new ReservationKafkaConfig().reservationCancellationTopic(properties);
 

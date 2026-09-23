@@ -2,6 +2,7 @@ package com.rentflow;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -43,6 +44,7 @@ import org.testcontainers.kafka.KafkaContainer;
 
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCancellationOutbox;
+import com.rentflow.model.ReservationStatus;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
 import com.rentflow.repository.ReservationRepository;
 import com.rentflow.service.ReservationCancellationOutboxRelayService;
@@ -141,6 +143,33 @@ class ReservationCancellationKafkaIT extends PostgresIntegrationTest {
         assertTopicPolicy();
     }
 
+    @Test
+    void publishesAutomaticExpirationWithTheExistingVersionOneContract() throws Exception {
+        Instant databaseTime = reservations.databaseTime();
+        Reservation reservation = new Reservation(
+                "KAFKA-EXPIRED",
+                "CUSTOMER-001",
+                "ORDER-EXPIRED",
+                LocalDate.of(2026, 10, 1),
+                LocalDate.of(2026, 10, 3),
+                databaseTime.minus(Duration.ofMinutes(11)),
+                databaseTime.minus(Duration.ofMinutes(1)));
+        reservations.saveAndFlush(reservation);
+
+        assertThat(cancellation.expireOldestHeld()).isEqualTo(ReservationCancellationService.ExpirationResult.EXPIRED);
+        ReservationCancellationOutbox expected = outboxes.findAll().getFirst();
+        assertThat(relay.publishOldest().status())
+                .isEqualTo(ReservationCancellationOutboxRelayService.Status.PUBLISHED);
+
+        ConsumerRecord<byte[], byte[]> record = consumeForKey("KAFKA-EXPIRED");
+        assertThat(new String(record.value(), StandardCharsets.UTF_8)).isEqualTo(expected.getPayload());
+        assertThat(new String(record.value(), StandardCharsets.UTF_8))
+                .contains("\"eventType\":\"ReservationCancelled\"", "\"eventVersion\":1")
+                .doesNotContain("reason", "reservationId");
+        assertThat(reservations.findById(reservation.getId()).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.CANCELLED);
+    }
+
     private Reservation reservation(String orderId) {
         return new Reservation(
                 "KAFKA-ORDER", "CUSTOMER-001", orderId, LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3));
@@ -163,6 +192,28 @@ class ReservationCancellationKafkaIT extends PostgresIntegrationTest {
             }
         }
         return received;
+    }
+
+    private ConsumerRecord<byte[], byte[]> consumeForKey(String expectedKey) {
+        Map<String, Object> properties = new HashMap<>();
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "reservation-cancellation-reader-" + UUID.randomUUID());
+        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
+        try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(properties)) {
+            consumer.subscribe(Set.of(TOPIC));
+            long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (System.nanoTime() < deadline) {
+                ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofMillis(200));
+                for (ConsumerRecord<byte[], byte[]> record : records) {
+                    if (new String(record.key(), StandardCharsets.UTF_8).equals(expectedKey)) {
+                        return record;
+                    }
+                }
+            }
+        }
+        throw new AssertionError("Kafka record was not received for key " + expectedKey);
     }
 
     private void assertTopicPolicy() throws Exception {

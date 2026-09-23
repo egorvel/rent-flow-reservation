@@ -119,14 +119,33 @@ class OpenApiIT extends PostgresIntegrationTest {
                 .containsExactlyInAnyOrder("serialNumber", "customerId", "orderId", "startDate", "endDate", "status");
         assertThat(response.path("properties").propertyNames())
                 .containsExactlyInAnyOrder(
-                        "id", "serialNumber", "customerId", "orderId", "startDate", "endDate", "timestamp", "status");
+                        "id",
+                        "serialNumber",
+                        "customerId",
+                        "orderId",
+                        "startDate",
+                        "endDate",
+                        "timestamp",
+                        "holdExpiresAt",
+                        "status");
         assertThat(response.at("/properties/id/format").asString()).isEqualTo("uuid");
         assertThat(response.at("/properties/timestamp/format").asString()).isEqualTo("date-time");
+        assertThat(response.at("/properties/holdExpiresAt/format").asString()).isEqualTo("date-time");
         assertThat(response.at("/properties/id/readOnly").asBoolean()).isTrue();
         assertThat(response.at("/properties/timestamp/readOnly").asBoolean()).isTrue();
+        assertThat(response.at("/properties/holdExpiresAt/readOnly").asBoolean())
+                .isTrue();
         assertThat(strings(response.path("required")))
                 .containsExactlyInAnyOrder(
-                        "id", "serialNumber", "customerId", "orderId", "startDate", "endDate", "timestamp", "status");
+                        "id",
+                        "serialNumber",
+                        "customerId",
+                        "orderId",
+                        "startDate",
+                        "endDate",
+                        "timestamp",
+                        "holdExpiresAt",
+                        "status");
         for (String name : List.of("ReservationDTO")) {
             JsonNode properties = schema(name).path("properties");
             assertThat(properties.at("/serialNumber/pattern").asString())
@@ -246,6 +265,7 @@ class OpenApiIT extends PostgresIntegrationTest {
                 LocalDate.parse(responseExample.path("startDate").asString()),
                 LocalDate.parse(responseExample.path("endDate").asString()),
                 Instant.parse(responseExample.path("timestamp").asString()),
+                Instant.parse(responseExample.path("holdExpiresAt").asString()),
                 responseExample.path("status").asString());
         assertThat(validator.validate(response)).isEmpty();
         JsonNode serializedResponse = mapper.valueToTree(response);
@@ -262,6 +282,7 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertThat(validator.validate(request)).isEmpty();
         assertThat(request.id()).isNull();
         assertThat(request.timestamp()).isNull();
+        assertThat(request.holdExpiresAt()).isNull();
 
         CreateReservationsRequest creation = new CreateReservationsRequest(
                 request.customerId(),

@@ -1,5 +1,6 @@
 package com.rentflow.service;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -10,6 +11,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -36,16 +38,19 @@ public class ReservationCreationService {
     private final ReservationRepository reservations;
     private final InventoryGateway inventory;
     private final MeterRegistry metrics;
+    private final Duration holdDuration;
 
     public ReservationCreationService(
             ReservationCreationRequestRepository creationRequests,
             ReservationRepository reservations,
             InventoryGateway inventory,
-            MeterRegistry metrics) {
+            MeterRegistry metrics,
+            @Value("${reservation.cancellation.expiration.hold-duration:10m}") Duration holdDuration) {
         this.creationRequests = creationRequests;
         this.reservations = reservations;
         this.inventory = inventory;
         this.metrics = metrics;
+        this.holdDuration = holdDuration;
     }
 
     @Transactional
@@ -142,9 +147,17 @@ public class ReservationCreationService {
 
     private Result completeSuccess(
             UUID key, String fingerprint, ReservationCreationRequest request, ReservationCreationCommand command) {
+        Instant creationTime = creationRequests.databaseTime();
+        Instant holdExpiresAt = creationTime.plus(holdDuration);
         List<Reservation> created = command.items().stream()
                 .map(item -> new Reservation(
-                        item.serialNumber(), command.customerId(), command.orderId(), item.startDate(), item.endDate()))
+                        item.serialNumber(),
+                        command.customerId(),
+                        command.orderId(),
+                        item.startDate(),
+                        item.endDate(),
+                        creationTime,
+                        holdExpiresAt))
                 .toList();
         List<Reservation> saved = reservations.saveAllAndFlush(created);
         List<ReservationSnapshot> snapshots = saved.stream()
@@ -156,6 +169,7 @@ public class ReservationCreationService {
                         reservation.getStartDate(),
                         reservation.getEndDate(),
                         reservation.getTimestamp(),
+                        reservation.getHoldExpiresAt(),
                         reservation.getStatus().name()))
                 .toList();
         return complete(key, fingerprint, request, ReservationCreationOutcomes.success(snapshots));

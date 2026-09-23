@@ -18,7 +18,8 @@ public record ReservationCancellationProperties(
         @Positive int maxPayloadBytes,
         @Valid @NotNull Relay relay,
         @Valid @NotNull Retry retry,
-        @Valid @NotNull Cleanup cleanup) {
+        @Valid @NotNull Cleanup cleanup,
+        @Valid @NotNull Expiration expiration) {
 
     public record Relay(
             @NotNull Duration fixedDelay,
@@ -50,6 +51,19 @@ public record ReservationCancellationProperties(
     public record Cleanup(@NotBlank String cron, @NotNull Duration runtimeBudget) {
         public Cleanup {
             requirePositive(runtimeBudget, "cleanup.runtimeBudget");
+        }
+    }
+
+    public record Expiration(
+            boolean enabled,
+            @NotNull Duration holdDuration,
+            @NotNull Duration fixedDelay,
+            @NotNull Duration runtimeBudget,
+            @Positive int maxReservationsPerRun) {
+        public Expiration {
+            requirePositive(holdDuration, "expiration.holdDuration");
+            requirePositive(fixedDelay, "expiration.fixedDelay");
+            requirePositive(runtimeBudget, "expiration.runtimeBudget");
         }
     }
 

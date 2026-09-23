@@ -6,6 +6,7 @@ import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.rentflow.model.Reservation;
@@ -49,6 +50,27 @@ public class ReservationCancellationService {
         }
 
         Instant occurredAt = outboxes.databaseTime();
+        transitionToCancelled(reservation, occurredAt);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public ExpirationResult expireOldestHeld() {
+        if (!reservations.tryExpirationLock()) {
+            return ExpirationResult.LOCK_BUSY;
+        }
+        Instant databaseTime = reservations.databaseTime();
+        Reservation reservation = reservations
+                .findFirstByStatusAndHoldExpiresAtLessThanEqualOrderByHoldExpiresAtAscIdAsc(
+                        ReservationStatus.HELD, databaseTime)
+                .orElse(null);
+        if (reservation == null) {
+            return ExpirationResult.EMPTY;
+        }
+        transitionToCancelled(reservation, databaseTime);
+        return ExpirationResult.EXPIRED;
+    }
+
+    private void transitionToCancelled(Reservation reservation, Instant occurredAt) {
         UUID eventId = UUID.randomUUID();
         ReservationCancellationEvent event = new ReservationCancellationEvent(
                 eventId.toString(), EVENT_TYPE, EVENT_VERSION, occurredAt.toString(), reservation.getSerialNumber());
@@ -69,5 +91,11 @@ public class ReservationCancellationService {
             throw new IllegalStateException("Reservation cancellation event exceeds the configured size limit");
         }
         return payload;
+    }
+
+    public enum ExpirationResult {
+        EXPIRED,
+        EMPTY,
+        LOCK_BUSY
     }
 }

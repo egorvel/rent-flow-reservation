@@ -16,7 +16,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 
 @Schema(
         description =
-                "Reservation representation used for full replacement and responses; ID and timestamp are response-only.",
+                "Reservation representation used for full replacement and responses; ID, timestamp, and holdExpiresAt are response-only.",
         example = """
 {
   "serialNumber": "DRILL-001",
@@ -26,7 +26,8 @@ import io.swagger.v3.oas.annotations.media.Schema;
   "endDate": "2026-10-03",
   "status": "HELD",
   "id": "ef469102-af79-4a47-9afb-f34937c9481f",
-  "timestamp": "2026-09-07T12:00:00.123456Z"
+  "timestamp": "2026-09-07T12:00:00.123456Z",
+  "holdExpiresAt": "2026-09-07T12:10:00.123456Z"
 }
 """)
 public record ReservationDTO(
@@ -90,6 +91,15 @@ public record ReservationDTO(
                 requiredMode = Schema.RequiredMode.REQUIRED)
         @JsonProperty(access = JsonProperty.Access.READ_ONLY)
         Instant timestamp,
+
+        @Schema(
+                description = "Immutable server-generated UTC deadline for the temporary hold.",
+                example = "2026-09-07T12:10:00.123456Z",
+                format = "date-time",
+                accessMode = Schema.AccessMode.READ_ONLY,
+                requiredMode = Schema.RequiredMode.REQUIRED)
+        @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+        Instant holdExpiresAt,
 
         @Schema(
                 description = "Required on replacement without transition rules; always HELD in creation responses.",

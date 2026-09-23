@@ -28,6 +28,18 @@ class ReservationCancellationPropertiesTest {
                 .hasSize(2);
     }
 
+    @Test
+    void rejectsNonPositiveExpirationDurations() {
+        assertThatThrownBy(() -> new ReservationCancellationProperties.Expiration(
+                        true, Duration.ZERO, Duration.ofSeconds(5), Duration.ofSeconds(5), 100))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("holdDuration");
+        assertThatThrownBy(() -> new ReservationCancellationProperties.Expiration(
+                        true, Duration.ofMinutes(10), Duration.ZERO, Duration.ofSeconds(5), 100))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("fixedDelay");
+    }
+
     private ReservationCancellationProperties properties(
             Duration initial, double multiplier, Duration maximum, double jitter) {
         return new ReservationCancellationProperties(
@@ -36,6 +48,8 @@ class ReservationCancellationPropertiesTest {
                 new ReservationCancellationProperties.Relay(
                         Duration.ofSeconds(1), Duration.ofSeconds(5), 100, Duration.ofSeconds(50)),
                 new ReservationCancellationProperties.Retry(initial, multiplier, maximum, jitter),
-                new ReservationCancellationProperties.Cleanup("0 30 3 * * *", Duration.ofSeconds(60)));
+                new ReservationCancellationProperties.Cleanup("0 30 3 * * *", Duration.ofSeconds(60)),
+                new ReservationCancellationProperties.Expiration(
+                        true, Duration.ofMinutes(10), Duration.ofSeconds(5), Duration.ofSeconds(5), 100));
     }
 }

@@ -114,3 +114,9 @@ reservation:
     cleanup:
       cron: "0 30 3 * * *"
       runtime-budget: 60s
+    expiration:
+      enabled: true
+      hold-duration: 10m
+      fixed-delay: 5s
+      runtime-budget: 5s
+      max-reservations-per-run: 100

@@ -112,6 +112,48 @@ class ReservationCancellationServiceTest {
         verify(outboxes, never()).save(org.mockito.ArgumentMatchers.any());
     }
 
+    @Test
+    void expirationStopsWhenAnotherInstanceOwnsTheClusterLock() {
+        when(reservations.tryExpirationLock()).thenReturn(false);
+
+        assertThat(service.expireOldestHeld()).isEqualTo(ReservationCancellationService.ExpirationResult.LOCK_BUSY);
+
+        verify(reservations, never()).databaseTime();
+        verify(outboxes, never()).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void expirationReturnsEmptyWhenNoHeldDeadlineIsDue() {
+        when(reservations.tryExpirationLock()).thenReturn(true);
+        when(reservations.databaseTime()).thenReturn(DATABASE_TIME);
+        when(reservations.findFirstByStatusAndHoldExpiresAtLessThanEqualOrderByHoldExpiresAtAscIdAsc(
+                        ReservationStatus.HELD, DATABASE_TIME))
+                .thenReturn(Optional.empty());
+
+        assertThat(service.expireOldestHeld()).isEqualTo(ReservationCancellationService.ExpirationResult.EMPTY);
+
+        verify(outboxes, never()).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void expirationUsesTheSharedCancellationTransitionAtDatabaseTime() {
+        Reservation reservation = reservation(ReservationStatus.HELD);
+        when(reservations.tryExpirationLock()).thenReturn(true);
+        when(reservations.databaseTime()).thenReturn(DATABASE_TIME);
+        when(reservations.findFirstByStatusAndHoldExpiresAtLessThanEqualOrderByHoldExpiresAtAscIdAsc(
+                        ReservationStatus.HELD, DATABASE_TIME))
+                .thenReturn(Optional.of(reservation));
+
+        assertThat(service.expireOldestHeld()).isEqualTo(ReservationCancellationService.ExpirationResult.EXPIRED);
+
+        ArgumentCaptor<ReservationCancellationOutbox> captor =
+                ArgumentCaptor.forClass(ReservationCancellationOutbox.class);
+        verify(outboxes).save(captor.capture());
+        assertThat(reservation.getStatus()).isEqualTo(ReservationStatus.CANCELLED);
+        assertThat(captor.getValue().getOccurredAt()).isEqualTo(DATABASE_TIME);
+        assertThat(captor.getValue().getPayload()).contains("\"eventType\":\"ReservationCancelled\"");
+    }
+
     private Reservation reservation(ReservationStatus status) {
         Reservation reservation = new Reservation(
                 "Drill-001", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 2));
