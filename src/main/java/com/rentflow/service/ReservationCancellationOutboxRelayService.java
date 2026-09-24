@@ -11,15 +11,14 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-import com.rentflow.model.ReservationCancellationFailureCode;
 import com.rentflow.model.ReservationCancellationOutbox;
+import com.rentflow.model.ReservationCancellationOutbox.FailureCode;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
 
 @Service
@@ -36,20 +35,16 @@ public class ReservationCancellationOutboxRelayService {
     public ReservationCancellationOutboxRelayService(
             ReservationCancellationOutboxRepository outboxes,
             KafkaTemplate<byte[], byte[]> kafka,
-            @Value("${reservation.cancellation.topic:rentflow.reservation.cancelled.v1}") String topic,
-            @Value("${reservation.cancellation.relay.send-timeout:50s}") Duration sendTimeout,
-            @Value("${reservation.cancellation.retry.initial-backoff:1s}") Duration initialBackoff,
-            @Value("${reservation.cancellation.retry.multiplier:2}") double backoffMultiplier,
-            @Value("${reservation.cancellation.retry.max-backoff:5m}") Duration maxBackoff,
-            @Value("${reservation.cancellation.retry.jitter:0.2}") double backoffJitter) {
+            ReservationRuntimeSettings settings) {
+        ReservationRuntimeSettings.Cancellation cancellation = settings.cancellation();
         this.outboxes = outboxes;
         this.kafka = kafka;
-        this.topic = topic;
-        this.sendTimeout = sendTimeout;
-        this.initialBackoff = initialBackoff;
-        this.backoffMultiplier = backoffMultiplier;
-        this.maxBackoff = maxBackoff;
-        this.backoffJitter = backoffJitter;
+        this.topic = cancellation.topic();
+        this.sendTimeout = cancellation.relay().sendTimeout();
+        this.initialBackoff = cancellation.retry().initialBackoff();
+        this.backoffMultiplier = cancellation.retry().multiplier();
+        this.maxBackoff = cancellation.retry().maxBackoff();
+        this.backoffJitter = cancellation.retry().jitter();
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -76,13 +71,11 @@ public class ReservationCancellationOutboxRelayService {
                     outbox.getPayload().getBytes(StandardCharsets.UTF_8));
             future.get(sendTimeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
-            return recordFailure(outbox, ReservationCancellationFailureCode.RELAY_INTERRUPTED, true);
+            return recordFailure(outbox, FailureCode.RELAY_INTERRUPTED, true);
         } catch (TimeoutException exception) {
-            return recordFailure(outbox, ReservationCancellationFailureCode.KAFKA_SEND_TIMEOUT, false);
+            return recordFailure(outbox, FailureCode.KAFKA_SEND_TIMEOUT, false);
         } catch (ExecutionException | RuntimeException exception) {
-            ReservationCancellationFailureCode code = isTimeout(exception)
-                    ? ReservationCancellationFailureCode.KAFKA_SEND_TIMEOUT
-                    : ReservationCancellationFailureCode.KAFKA_SEND_FAILED;
+            FailureCode code = isTimeout(exception) ? FailureCode.KAFKA_SEND_TIMEOUT : FailureCode.KAFKA_SEND_FAILED;
             return recordFailure(outbox, code, false);
         }
 
@@ -93,9 +86,7 @@ public class ReservationCancellationOutboxRelayService {
     }
 
     private Result recordFailure(
-            ReservationCancellationOutbox outbox,
-            ReservationCancellationFailureCode failureCode,
-            boolean restoreInterrupt) {
+            ReservationCancellationOutbox outbox, FailureCode failureCode, boolean restoreInterrupt) {
         Instant failedAt = outboxes.databaseTime();
         int failedAttempt = outbox.getAttemptCount() + 1;
         Duration delay = retryDelay(
@@ -151,7 +142,7 @@ public class ReservationCancellationOutboxRelayService {
             Status status,
             UUID eventId,
             int attemptCount,
-            ReservationCancellationFailureCode failureCode,
+            FailureCode failureCode,
             Instant nextAttemptAt,
             boolean recovered) {
         private static Result stopped(Status status) {

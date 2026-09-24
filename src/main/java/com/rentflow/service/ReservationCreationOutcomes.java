@@ -2,21 +2,21 @@ package com.rentflow.service;
 
 import java.util.List;
 
-import com.rentflow.model.ReservationCommandViolation;
-import com.rentflow.model.ReservationCreationFailure;
 import com.rentflow.model.ReservationCreationOutcome;
-import com.rentflow.model.ReservationSnapshot;
+import com.rentflow.model.ReservationCreationOutcome.Failure;
+import com.rentflow.model.ReservationCreationOutcome.Snapshot;
+import com.rentflow.model.ReservationCreationOutcome.Violation;
 
 public final class ReservationCreationOutcomes {
     public static final String PATH = "/api/v1/reservations";
 
     private ReservationCreationOutcomes() {}
 
-    public static ReservationCreationOutcome success(List<ReservationSnapshot> reservations) {
+    public static ReservationCreationOutcome success(List<Snapshot> reservations) {
         return new ReservationCreationOutcome(201, null, null, null, PATH, null, reservations, List.of(), List.of());
     }
 
-    public static ReservationCreationOutcome active(List<ReservationCreationFailure> failures) {
+    public static ReservationCreationOutcome active(List<Failure> failures) {
         return problem(
                 409,
                 "active-reservation-exists",
@@ -27,7 +27,7 @@ public final class ReservationCreationOutcomes {
                 List.of());
     }
 
-    public static ReservationCreationOutcome validation(List<ReservationCommandViolation> violations) {
+    public static ReservationCreationOutcome validation(List<Violation> violations) {
         return problem(
                 400,
                 "validation-failed",
@@ -38,7 +38,7 @@ public final class ReservationCreationOutcomes {
                 violations);
     }
 
-    public static ReservationCreationOutcome inventoryMissing(List<ReservationCreationFailure> failures) {
+    public static ReservationCreationOutcome inventoryMissing(List<Failure> failures) {
         return problem(
                 422,
                 "inventory-item-not-found",
@@ -49,7 +49,7 @@ public final class ReservationCreationOutcomes {
                 List.of());
     }
 
-    public static ReservationCreationOutcome inventoryUnavailable(List<ReservationCreationFailure> failures) {
+    public static ReservationCreationOutcome inventoryUnavailable(List<Failure> failures) {
         return problem(
                 409,
                 "inventory-item-unavailable",
@@ -60,9 +60,9 @@ public final class ReservationCreationOutcomes {
                 List.of());
     }
 
-    public static ReservationCreationOutcome invalidInventoryReference(List<ReservationCreationFailure> failures) {
-        List<ReservationCommandViolation> violations = failures.stream()
-                .map(failure -> new ReservationCommandViolation(
+    public static ReservationCreationOutcome invalidInventoryReference(List<Failure> failures) {
+        List<Violation> violations = failures.stream()
+                .map(failure -> new Violation(
                         "items[" + failure.index() + "].serialNumber", "is not a valid Inventory reference"))
                 .toList();
         return problem(
@@ -103,8 +103,8 @@ public final class ReservationCreationOutcomes {
             String title,
             String detail,
             String code,
-            List<ReservationCreationFailure> failures,
-            List<ReservationCommandViolation> violations) {
+            List<Failure> failures,
+            List<Violation> violations) {
         return new ReservationCreationOutcome(
                 status,
                 "urn:rentflow:problem:" + typeSuffix,

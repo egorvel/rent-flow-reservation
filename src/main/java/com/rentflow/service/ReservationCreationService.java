@@ -11,17 +11,16 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.rentflow.model.Reservation;
-import com.rentflow.model.ReservationCommandViolation;
 import com.rentflow.model.ReservationCreationCommand;
-import com.rentflow.model.ReservationCreationFailure;
 import com.rentflow.model.ReservationCreationOutcome;
+import com.rentflow.model.ReservationCreationOutcome.Failure;
+import com.rentflow.model.ReservationCreationOutcome.Snapshot;
+import com.rentflow.model.ReservationCreationOutcome.Violation;
 import com.rentflow.model.ReservationCreationRequest;
-import com.rentflow.model.ReservationSnapshot;
 import com.rentflow.model.ReservationStatus;
 import com.rentflow.repository.ReservationCreationRequestRepository;
 import com.rentflow.repository.ReservationRepository;
@@ -45,12 +44,12 @@ public class ReservationCreationService {
             ReservationRepository reservations,
             InventoryGateway inventory,
             MeterRegistry metrics,
-            @Value("${reservation.cancellation.expiration.hold-duration:10m}") Duration holdDuration) {
+            ReservationRuntimeSettings settings) {
         this.creationRequests = creationRequests;
         this.reservations = reservations;
         this.inventory = inventory;
         this.metrics = metrics;
-        this.holdDuration = holdDuration;
+        this.holdDuration = settings.cancellation().expiration().holdDuration();
     }
 
     @Transactional
@@ -75,12 +74,12 @@ public class ReservationCreationService {
 
         count("attempt");
         LocalDate currentDate = creationRequests.databaseUtcDate();
-        List<ReservationCommandViolation> violations = validate(command, currentDate);
+        List<Violation> violations = validate(command, currentDate);
         if (!violations.isEmpty()) {
             return complete(key, fingerprint, request, ReservationCreationOutcomes.validation(violations));
         }
 
-        List<ReservationCreationFailure> conflicts = activeFailures(command, currentDate);
+        List<Failure> conflicts = activeFailures(command, currentDate);
         if (!conflicts.isEmpty()) {
             return complete(key, fingerprint, request, ReservationCreationOutcomes.active(conflicts));
         }
@@ -111,13 +110,13 @@ public class ReservationCreationService {
         };
     }
 
-    private List<ReservationCommandViolation> validate(ReservationCreationCommand command, LocalDate currentDate) {
-        List<ReservationCommandViolation> violations = new ArrayList<>(ReservationCreationValidation.stable(command));
+    private List<Violation> validate(ReservationCreationCommand command, LocalDate currentDate) {
+        List<Violation> violations = new ArrayList<>(ReservationCreationValidation.stable(command));
         violations.addAll(ReservationCreationValidation.againstAcceptedDate(command, currentDate));
         return List.copyOf(violations);
     }
 
-    private List<ReservationCreationFailure> activeFailures(ReservationCreationCommand command, LocalDate currentDate) {
+    private List<Failure> activeFailures(ReservationCreationCommand command, LocalDate currentDate) {
         List<Reservation> activeReservations =
                 reservations.findAllBySerialNumberInAndStatusInAndEndDateGreaterThanEqual(
                         new LinkedHashSet<>(serialNumbers(command)), ACTIVE_STATUSES, currentDate);
@@ -125,11 +124,11 @@ public class ReservationCreationService {
         for (Reservation reservation : activeReservations) {
             activeSerialNumbers.add(reservation.getSerialNumber());
         }
-        List<ReservationCreationFailure> failures = new ArrayList<>();
+        List<Failure> failures = new ArrayList<>();
         for (int index = 0; index < command.items().size(); index++) {
             String serialNumber = command.items().get(index).serialNumber();
             if (activeSerialNumbers.contains(serialNumber)) {
-                failures.add(new ReservationCreationFailure(
+                failures.add(new Failure(
                         index,
                         serialNumber,
                         "ACTIVE_RESERVATION_EXISTS",
@@ -160,8 +159,8 @@ public class ReservationCreationService {
                         holdExpiresAt))
                 .toList();
         List<Reservation> saved = reservations.saveAllAndFlush(created);
-        List<ReservationSnapshot> snapshots = saved.stream()
-                .map(reservation -> new ReservationSnapshot(
+        List<Snapshot> snapshots = saved.stream()
+                .map(reservation -> new Snapshot(
                         reservation.getId(),
                         reservation.getSerialNumber(),
                         reservation.getCustomerId(),

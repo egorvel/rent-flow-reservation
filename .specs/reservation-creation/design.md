@@ -36,10 +36,14 @@ ReservationController
 - `ReservationCreationRequestRepository` provides the terminal ledger, PostgreSQL time,
   transaction advisory locking, and cleanup queries.
 - `ReservationRepository` provides the existing active-reservation lookup and persistence.
+- `ReservationCreationOutcome` owns its `Snapshot`, `Failure`, and `Violation` value records; their
+  persisted JSON fields and ordering remain unchanged.
+- `InventoryGateway` owns its protocol and service-unavailable exceptions as part of the gateway
+  contract, while `RestInventoryService` translates HTTP failures into those types.
 - `RestInventoryService` remains the HTTP adapter and owns Resilience4j retry and circuit-breaker
   composition.
-- `ReservationCreationCleanupService` deletes expired terminal outcomes on the existing daily UTC
-  schedule. It never invokes Inventory or creates reservations.
+- `ReservationCleanupScheduledService` and `ReservationCleanupService` delete expired terminal
+  outcomes on the existing daily UTC schedule. They never invoke Inventory or create reservations.
 
 The redesign removes `ReservationCreationStoreService`, workflow preparation/result/state models,
 lease exceptions, recovery services, creation settings/properties, and the separate creation
@@ -236,9 +240,10 @@ responses are not retried.
 
 ## 6. Cleanup and metrics
 
-`ReservationCreationCleanupService` runs daily at 03:00 UTC by default. It deletes expired rows in
-chunks of 1000 ordered by expiry and key, using `FOR UPDATE SKIP LOCKED`, and stops after the
-configured 60-second runtime budget. The scheduler touches only the terminal ledger.
+`ReservationCleanupScheduledService` runs creation-ledger cleanup daily at 03:00 UTC by default.
+It delegates each chunk to `ReservationCleanupService` in a new transaction, deleting expired rows
+in chunks of 1000 ordered by expiry and key with `FOR UPDATE SKIP LOCKED`, and stops after the
+configured 60-second runtime budget. This entrypoint touches only the terminal ledger.
 
 The service records bounded values for idempotency attempt, replay, mismatch, and busy outcomes.
 Cleanup records deleted rows, failure, duration, and expired backlog. Existing Resilience4j metrics

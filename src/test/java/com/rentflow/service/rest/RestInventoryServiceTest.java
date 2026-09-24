@@ -21,7 +21,7 @@ import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
 
 import com.rentflow.service.InventoryGateway.ClaimResult;
-import com.rentflow.service.InventoryServiceUnavailableException;
+import com.rentflow.service.InventoryGateway.ServiceUnavailableException;
 
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.retry.RetryConfig;
@@ -131,8 +131,7 @@ class RestInventoryServiceTest {
         when(client.reserve(org.mockito.ArgumentMatchers.eq(key), org.mockito.ArgumentMatchers.any()))
                 .thenThrow(new ResourceAccessException("timeout"));
 
-        assertThatThrownBy(() -> service.claim(key, List.of("A")))
-                .isInstanceOf(InventoryServiceUnavailableException.class);
+        assertThatThrownBy(() -> service.claim(key, List.of("A"))).isInstanceOf(ServiceUnavailableException.class);
 
         verify(client, times(5)).reserve(org.mockito.ArgumentMatchers.eq(key), org.mockito.ArgumentMatchers.any());
     }
@@ -147,8 +146,7 @@ class RestInventoryServiceTest {
         when(client.reserve(org.mockito.ArgumentMatchers.eq(key), org.mockito.ArgumentMatchers.any()))
                 .thenThrow(failure);
 
-        assertThatThrownBy(() -> service.claim(key, List.of("A")))
-                .isInstanceOf(InventoryServiceUnavailableException.class);
+        assertThatThrownBy(() -> service.claim(key, List.of("A"))).isInstanceOf(ServiceUnavailableException.class);
 
         verify(client, times(5)).reserve(org.mockito.ArgumentMatchers.eq(key), org.mockito.ArgumentMatchers.any());
     }
@@ -162,8 +160,7 @@ class RestInventoryServiceTest {
         when(client.reserve(org.mockito.ArgumentMatchers.eq(key), org.mockito.ArgumentMatchers.any()))
                 .thenThrow(failure);
 
-        assertThatThrownBy(() -> service.claim(key, List.of("A")))
-                .isInstanceOf(InventoryServiceUnavailableException.class);
+        assertThatThrownBy(() -> service.claim(key, List.of("A"))).isInstanceOf(ServiceUnavailableException.class);
 
         verify(client).reserve(org.mockito.ArgumentMatchers.eq(key), org.mockito.ArgumentMatchers.any());
     }

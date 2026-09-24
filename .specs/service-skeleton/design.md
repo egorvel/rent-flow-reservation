@@ -20,6 +20,13 @@ independent. Use the packages prescribed by AGENTS.md and the existing Pricing A
 All unit tests run without Spring; use Mockito only for collaborators. No Security, H2, Lombok,
 MapStruct, or new framework is needed. The API and docs are unauthenticated (AC7.5).
 
+Configuration binding remains in the `config` package. The validated root `ReservationProperties`
+hierarchy binds the `reservation` prefix, and `ReservationServiceConfig` projects those values into
+the service-owned immutable `ReservationRuntimeSettings`. Services consume that projection rather
+than depending on the config package, preserving the ArchUnit direction `config -> service` and
+avoiding a package cycle. `application.yaml` owns defaults; scheduled annotations contain only
+property placeholders.
+
 ## 2. Resource, storage, and validation
 
 ### 2.1 Fields
@@ -100,6 +107,10 @@ limit. Use typed `ReservationSortField`, PageRequest and Spring Data non-HATEOAS
 after mapping entities. Sort ties use id ASC unless id is primary. Empty/out-of-range pages
 retain accurate totals; no filtering (AC2.1–AC2.4).
 
+`ReservationController` keeps endpoint annotations and delegates parsing of the idempotency key,
+collection-parameter allowlist, page offset, sort field, and direction to private helpers. These
+helpers retain the same `RequestValidationException` fields and messages.
+
 ### 3.3 Mutation
 
 PUT `/{id}` updates all five details plus status and returns 200 DTO. ID and creation timestamp
@@ -119,6 +130,10 @@ UNSUPPORTED_MEDIA_TYPE/415, HTTP_ERROR for other framework client errors, INTERN
 Do not echo malformed request text or internal exception messages. Unexpected-error logging
 records method, path and exception class without potentially sensitive exception messages or
 request bodies. HTTP failures retain relevant framework headers (AC3.3–AC3.5).
+
+`ApiExceptionHandler` keeps repeated type, title, detail, status, and code metadata in its private
+`ApiProblem` catalogue. Dynamic reservation IDs, validation violations, and framework-provided
+headers remain outside the catalogue so their existing response values are preserved.
 
 ## 4. Documentation and operation
 
@@ -157,7 +172,7 @@ Build with Maven package (unit tests run; Failsafe runs during separate verify).
 10001, executable `/opt/reservation/reservation.jar`, curl readiness healthcheck respecting
 SERVER_PORT, and no compiler/Maven/cache. Docker ignore excludes local/IDE/git/env/build files.
 Compose provisions standalone `rentflow-postgres` at postgres:18.4-alpine and `reservation`.
-Default published application port 8081 avoids Pricing's 8080; PostgreSQL 5433 avoids Pricing's
+Default published application port 8082 avoids Pricing's 8080; PostgreSQL 5433 avoids Pricing's
 5432. Both are configurable and bind loopback locally. The PostgreSQL 18 volume mounts
 `/var/lib/postgresql`. Bootstrap shell safely quotes SQL identifiers/literals and provisions
 only reservation role and owned schema. Local credentials are explicit development fixtures.
@@ -179,6 +194,10 @@ No test/check skip flags. Testcontainers requires Docker and always uses Postgre
 The Wrapper pins Maven 3.9.16 with distribution checksum. Tests cover CRUD, duplicate acceptance,
 date/status/JSON validation, paging/sorting, error sanitation, schema isolation/migrations,
 OpenAPI and the prescribed ArchUnit layer graph (AC7.1–AC7.2).
+
+Surefire and Failsafe launch the managed `mockito-core` artifact as an explicit Java agent on Java
+25. `ReservationIT` groups scenarios with JUnit nested classes by creation, cancellation, CRUD,
+collection, and protocol behavior while reusing one outer Spring context and its shared fixtures.
 
 README documents the exact platform, build/Wrapper, all datasource variables, local and Compose
 workflows, shared-database prerequisite ownership, append-only migration paths, curl examples for

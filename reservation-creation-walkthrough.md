@@ -226,7 +226,7 @@ After Inventory returns exact success, the service:
 1. Creates one `Reservation` per command item.
 2. Calls `saveAllAndFlush`.
 3. Reads every database-generated ID and timestamp.
-4. Builds request-ordered immutable `ReservationSnapshot` values.
+4. Builds request-ordered immutable `ReservationCreationOutcome.Snapshot` values.
 5. Creates the terminal `201` outcome.
 6. Samples PostgreSQL completion time.
 7. Saves and flushes the ledger row.
@@ -268,8 +268,10 @@ Busy, transport, circuit-open, and protocol errors are temporary or uncertain an
 
 ## 12. Cleanup
 
-`ReservationCreationCleanupScheduledService` starts daily at 03:00 UTC by default. It calls
-`ReservationCreationCleanupService.deleteChunk`, where each chunk runs in a new transaction.
+`ReservationCleanupScheduledService` starts creation-ledger cleanup daily at 03:00 UTC by default.
+It calls `ReservationCleanupService.deleteExpiredCreationChunk`, where each chunk runs in a new
+transaction. The same two beans also own the separately scheduled cancellation-outbox cleanup,
+without sharing repository queries or retention rules.
 
 The repository deletes up to 1000 expired rows ordered by expiry and key with
 `FOR UPDATE SKIP LOCKED`. The scheduler repeats full chunks until it reaches a smaller chunk or
@@ -303,21 +305,15 @@ midnight revalidates against the new PostgreSQL UTC date. A start date that has 
 historical can therefore be rejected before Inventory replay is consulted. Persisting an in-progress
 intent would solve that edge by reintroducing workflow state, which this design intentionally omits.
 
-Inventory status still does not record reservation ownership and Reservation has no safe conditional
-release operation. Cancellation and the wider rental lifecycle remain separate future work.
+Inventory status still does not record reservation ownership. Cancellation releases an item
+asynchronously through its Kafka outbox, so this synchronous creation flow has no compensating
+release operation when its local commit fails after Inventory accepts the claim.
 
-## 15. Main files
+## 15. Related documentation
 
-| File | Responsibility |
-| --- | --- |
-| `ReservationController` | HTTP request, response, and idempotency headers |
-| `ReservationConverter` | DTO and domain-command conversion |
-| `ReservationCreationService` | Synchronous transaction and orchestration |
-| `ReservationCreationRequest` | Six-field terminal ledger entity |
-| `ReservationCreationRequestRepository` | Advisory lock, row lock, database time, and cleanup SQL |
-| `ReservationRepository` | Active lookup and reservation persistence |
-| `ReservationCreationOutcome` | Stored response representation |
-| `ReservationCreationOutcomes` | Stable outcome factories |
-| `RestInventoryService` | Inventory protocol and Resilience4j |
-| `ReservationCreationCleanupService` | Transactional cleanup chunks |
-| `ReservationCreationCleanupScheduledService` | Daily bounded cleanup loop and cleanup metrics |
+The normative contract and design are in
+[the reservation-creation spec](.specs/reservation-creation/requirements.md). Its
+[design](.specs/reservation-creation/design.md) and the
+[cancellation design](.specs/reservation-cancellation/design.md) record current type and shared
+cleanup ownership. Use the package layout and architecture test as the current component map
+rather than maintaining a duplicate file inventory here.

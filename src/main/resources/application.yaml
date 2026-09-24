@@ -102,6 +102,7 @@ reservation:
     topic: ${RESERVATION_CANCELLATION_TOPIC:rentflow.reservation.cancelled.v1}
     max-payload-bytes: 4096
     relay:
+      enabled: true
       fixed-delay: 1s
       runtime-budget: 5s
       max-events-per-run: 100
@@ -112,6 +113,7 @@ reservation:
       max-backoff: 5m
       jitter: 0.2
     cleanup:
+      enabled: true
       cron: "0 30 3 * * *"
       runtime-budget: 60s
     expiration:

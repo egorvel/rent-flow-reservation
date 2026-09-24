@@ -11,9 +11,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.core.KafkaTemplate;
 
-import com.rentflow.model.ReservationCancellationFailureCode;
 import com.rentflow.model.ReservationCancellationOutbox;
+import com.rentflow.model.ReservationCancellationOutbox.FailureCode;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
+import com.rentflow.support.ReservationPropertiesFixture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -36,14 +37,7 @@ class ReservationCancellationOutboxRelayServiceTest {
         outboxes = mock(ReservationCancellationOutboxRepository.class);
         kafka = mock(KafkaTemplate.class);
         service = new ReservationCancellationOutboxRelayService(
-                outboxes,
-                kafka,
-                "rentflow.reservation.cancelled.v1",
-                Duration.ofSeconds(1),
-                Duration.ofSeconds(1),
-                2,
-                Duration.ofMinutes(5),
-                0.2);
+                outboxes, kafka, ReservationPropertiesFixture.runtimeDefaults());
     }
 
     @Test
@@ -104,10 +98,10 @@ class ReservationCancellationOutboxRelayServiceTest {
         ReservationCancellationOutboxRelayService.Result result = service.publishOldest();
 
         assertThat(result.status()).isEqualTo(ReservationCancellationOutboxRelayService.Status.FAILED);
-        assertThat(result.failureCode()).isEqualTo(ReservationCancellationFailureCode.KAFKA_SEND_TIMEOUT);
+        assertThat(result.failureCode()).isEqualTo(FailureCode.KAFKA_SEND_TIMEOUT);
         assertThat(outbox.getPublishedAt()).isNull();
         assertThat(outbox.getAttemptCount()).isOne();
-        assertThat(outbox.getLastFailureCode()).isEqualTo(ReservationCancellationFailureCode.KAFKA_SEND_TIMEOUT);
+        assertThat(outbox.getLastFailureCode()).isEqualTo(FailureCode.KAFKA_SEND_TIMEOUT);
         assertThat(outbox.getRecordKey()).isEqualTo("Drill-001");
         assertThat(outbox.getPayload()).isEqualTo("{\"event\":true}");
         assertThat(outbox.getNextAttemptAt()).isBetween(ATTEMPT_AT.plusMillis(801), ATTEMPT_AT.plusMillis(1201));

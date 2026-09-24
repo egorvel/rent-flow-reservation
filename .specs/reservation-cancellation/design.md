@@ -59,8 +59,8 @@ ReservationCancellationOutboxRelayScheduledService [fixed-delay polling]
        -> ReservationCancellationOutboxRepository [cluster lock + oldest row lock]
        -> KafkaTemplate<byte[], byte[]> [wait for broker acknowledgement]
 
-ReservationCancellationOutboxCleanupScheduledService [daily]
-  -> ReservationCancellationOutboxCleanupService [bounded chunks]
+ReservationCleanupScheduledService [daily cancellation entrypoint]
+  -> ReservationCleanupService [bounded chunks]
        -> ReservationCancellationOutboxRepository
 
 ReservationHoldExpirationScheduledService [five-second fixed delay]
@@ -71,19 +71,21 @@ ReservationHoldExpirationScheduledService [five-second fixed delay]
 
 - `ReservationController` owns HTTP/OpenAPI mapping and returns an empty `204` response.
 - `ReservationCancellationService` owns row locking, state transition, event construction,
-  one-time serialization, atomic outbox persistence, and one timed-expiration attempt.
+  one-time serialization through its private event record, atomic outbox persistence, and one
+  timed-expiration attempt.
 - `ReservationHoldExpirationScheduledService` owns only bounded drain orchestration and expiration
   telemetry; it does not duplicate transition or event logic.
 - `ReservationCancellationOutbox` is the JPA entity for immutable event data plus mutable delivery
-  metadata.
+  metadata and owns the persisted `FailureCode` enum used by relay attempts.
 - `ReservationCancellationOutboxRepository` owns PostgreSQL time, advisory locking, FIFO selection,
   relay statistics, and cleanup SQL.
 - `ReservationCancellationOutboxRelayService` performs one publish attempt transaction.
 - `ReservationCancellationOutboxRelayScheduledService` bounds draining and records relay metrics.
-- `ReservationCancellationOutboxCleanupService` and its scheduler follow the existing bounded
-  cleanup pattern for acknowledged events.
-- `ReservationKafkaConfig` and validated cancellation properties own the producer and local topic
-  configuration.
+- `ReservationCleanupService` and its scheduler share bounded-loop orchestration with creation
+  cleanup while retaining explicit cancellation operations for acknowledged events.
+- Root `ReservationProperties` binds and validates creation and cancellation keys;
+  `ReservationServiceConfig` maps the service subset into `ReservationRuntimeSettings`, while
+  `ReservationKafkaConfig` owns producer and local-topic configuration.
 
 All types stay in the existing `controller`, `service`, `repository`, `model`, and `config`
 packages. No new architectural layer or shared event library is introduced.
@@ -411,11 +413,12 @@ claims exactly-once Kafka delivery.
 Unpublished rows are retained indefinitely, including during extended Kafka outages. No cleanup
 query can select them.
 
-Published rows are retained until `published_at` is at least 30 days old. At 03:30 UTC by default,
-`ReservationCancellationOutboxCleanupScheduledService` deletes eligible rows in chunks of 1000,
-ordered by `published_at, event_id`, and stops after a configurable 60-second runtime budget. Each
-chunk runs in `REQUIRES_NEW`; `FOR UPDATE SKIP LOCKED` makes concurrent service instances safe.
-The schedule is offset from the existing 03:00 reservation-creation cleanup.
+Published rows are retained until `published_at` is at least 30 days old.
+`ReservationCleanupScheduledService` invokes cancellation-outbox cleanup at 03:30 UTC by default.
+It deletes eligible rows through `ReservationCleanupService` in chunks of 1000, ordered by
+`published_at, event_id`, and stops after a configurable 60-second runtime budget. Each chunk runs
+in `REQUIRES_NEW`; `FOR UPDATE SKIP LOCKED` makes concurrent service instances safe. The schedule
+is offset from the 03:00 creation-ledger cleanup.
 
 Thirty days exceeds the source topic's seven-day retention and preserves the exact key/value for a
 bounded manual-recovery window. Published rows are not republished automatically merely because
@@ -722,8 +725,8 @@ transaction only appends to the existing outbox.
 
 ### 13.5 API and creation-ledger representation
 
-`ReservationDTO` and `ReservationSnapshot` add required `Instant holdExpiresAt` immediately after
-`timestamp`. The converter includes it for create, replay, get, list, replace, confirmed, and
+`ReservationDTO` and `ReservationCreationOutcome.Snapshot` add required `Instant holdExpiresAt`
+immediately after `timestamp`. The converter includes it for create, replay, get, list, replace, confirmed, and
 cancelled responses. OpenAPI marks it `readOnly: true`, `required`, and `date-time`. Jackson's
 existing `FAIL_ON_IGNORED_PROPERTIES` behavior rejects the field in replacement input; creation
 input has no such member and continues to reject unknown fields. Replacement copies no deadline,

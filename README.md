@@ -10,9 +10,9 @@ outbox to release the item through Kafka without making an HTTP request wait for
 
 The implementation follows the sibling Pricing service's MVC layers, DTO/converter pattern,
 Problem Details errors, page envelope, build checks, and schema ownership conventions.
-The sources of truth are [the service-skeleton spec](.specs/service-skeleton/requirements.md) and
-[the reservation-creation spec](.specs/reservation-creation/requirements.md), and
-[the reservation-cancellation spec](.specs/reservation-cancellation/requirements.md).
+The sources of truth are [the service-skeleton spec](.specs/service-skeleton/requirements.md),
+[the reservation-creation spec](.specs/reservation-creation/requirements.md),
+and [the reservation-cancellation spec](.specs/reservation-cancellation/requirements.md).
 
 ## Platform
 
@@ -32,12 +32,12 @@ Bash, `curl`, and `jq`.
 docker compose up --build --detach --wait
 ```
 
-Swagger UI: <http://localhost:8081/swagger-ui.html>
-OpenAPI: <http://localhost:8081/v3/api-docs>
-API: <http://localhost:8081/api/v1/reservations>
+Swagger UI: <http://localhost:8082/swagger-ui.html>
+OpenAPI: <http://localhost:8082/v3/api-docs>
+API: <http://localhost:8082/api/v1/reservations>
 
 The standalone development stack runs PostgreSQL on `127.0.0.1:5433`, the application on
-`127.0.0.1:8081`, and an internal deterministic Inventory stub for local creation requests. It
+`127.0.0.1:8082`, and an internal deterministic Inventory stub for local creation requests. It
 does not own a Kafka broker; cancellation remains durably buffered in the outbox until a broker is
 available. Use the `rent-flow-common` stack for the complete local Reservation-to-Inventory flow,
 or supply `KAFKA_BOOTSTRAP_SERVERS` and activate the `local` profile when connecting this service
@@ -63,7 +63,7 @@ administrator. Override local settings through environment variables or a gitign
 | Variable | Local Compose default | Purpose |
 | --- | --- | --- |
 | POSTGRES_PORT | 5433 | Host PostgreSQL port; loopback only |
-| RESERVATION_PORT | 8081 | Host application port; loopback only |
+| RESERVATION_PORT | 8082 | Host application port; loopback only |
 | POSTGRES_PASSWORD | rentflow-admin-local | Local bootstrap administrator password |
 | RESERVATION_DB_USER | reservation | Local application role and owner of the reservation schema |
 | RESERVATION_DB_PASSWORD | reservation-local | Local reservation role password |
@@ -80,7 +80,7 @@ docker compose up --detach --wait rentflow-postgres
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/rentflow \
 SPRING_DATASOURCE_USERNAME=reservation \
 SPRING_DATASOURCE_PASSWORD=reservation-local \
-SERVER_PORT=8081 \
+SERVER_PORT=8082 \
 ./mvnw -B -ntp spring-boot:run
 ```
 
@@ -117,7 +117,7 @@ export SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/rentflow
 export SPRING_DATASOURCE_USERNAME=reservation
 read -rs -p 'Reservation database password: ' SPRING_DATASOURCE_PASSWORD
 export SPRING_DATASOURCE_PASSWORD
-export SERVER_PORT=8081
+export SERVER_PORT=8082
 ./mvnw -B -ntp spring-boot:run
 ```
 
@@ -227,7 +227,7 @@ payloads, exception messages, and customer/order data.
 These examples use the local stack and `jq` to capture the first generated ID:
 
 ```bash
-BASE_URL=http://localhost:8081
+BASE_URL=http://localhost:8082
 IDEMPOTENCY_KEY=$(cat /proc/sys/kernel/random/uuid)
 CREATED=$(curl --fail-with-body --silent --show-error \
   --request POST --header 'Content-Type: application/json' \

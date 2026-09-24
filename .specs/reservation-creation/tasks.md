@@ -2,6 +2,11 @@
 
 Status: Implemented and verified.
 
+This is the historical completed task plan. Current internal ownership is documented in
+`design.md` §1.2 and §6: creation outcome values are nested under their owner, and creation-ledger
+cleanup now uses the shared `ReservationCleanupService` and `ReservationCleanupScheduledService`.
+Those structural changes do not alter the task outcomes or acceptance evidence below.
+
 Each task is one safe commit. The dependency graph is:
 
 ```mermaid

@@ -6,7 +6,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -33,18 +32,19 @@ public class ReservationCancellationOutboxRelayScheduledService {
             ReservationCancellationOutboxRelayService relay,
             ReservationCancellationOutboxRepository outboxes,
             MeterRegistry metrics,
-            @Value("${reservation.cancellation.relay.max-events-per-run:100}") int maxEventsPerRun,
-            @Value("${reservation.cancellation.relay.runtime-budget:5s}") Duration runtimeBudget) {
+            ReservationRuntimeSettings settings) {
+        ReservationRuntimeSettings.Cancellation.Relay relaySettings =
+                settings.cancellation().relay();
         this.relay = relay;
         this.outboxes = outboxes;
         this.metrics = metrics;
-        this.maxEventsPerRun = maxEventsPerRun;
-        this.budgetNanos = runtimeBudget.toNanos();
+        this.maxEventsPerRun = relaySettings.maxEventsPerRun();
+        this.budgetNanos = relaySettings.runtimeBudget().toNanos();
         metrics.gauge("reservation.cancellation.outbox.pending", pending);
         metrics.gauge("reservation.cancellation.outbox.oldest.age", oldestAgeSeconds);
     }
 
-    @Scheduled(fixedDelayString = "${reservation.cancellation.relay.fixed-delay:1s}")
+    @Scheduled(fixedDelayString = "${reservation.cancellation.relay.fixed-delay}")
     public void publish() {
         long started = System.nanoTime();
         int published = 0;

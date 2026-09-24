@@ -185,12 +185,7 @@ public class ReservationController {
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> create(
             HttpServletRequest servletRequest, @Valid @RequestBody CreateReservationsRequest request) {
-        UUID idempotencyKey;
-        try {
-            idempotencyKey = IdempotencyKeyParser.parse(Collections.list(servletRequest.getHeaders("Idempotency-Key")));
-        } catch (IllegalArgumentException exception) {
-            throw new RequestValidationException("Idempotency-Key", "must contain exactly one canonical UUID v4 value");
-        }
+        UUID idempotencyKey = parseIdempotencyKey(servletRequest);
         ReservationCreationService.Result result = creationService.create(idempotencyKey, converter.toCommand(request));
         return creationResponse(result);
     }
@@ -356,6 +351,22 @@ public class ReservationController {
                                             allowableValues = {"asc", "desc"}))
                     @RequestParam(defaultValue = "asc")
                     String direction) {
+        validateCollectionParameters(request);
+        validatePageOffset(page, size);
+        ReservationSortField field = parseSortField(sort);
+        Sort.Direction sortDirection = parseDirection(direction);
+        return new PagedModel<>(service.list(page, size, field, sortDirection).map(converter::toResponse));
+    }
+
+    private UUID parseIdempotencyKey(HttpServletRequest request) {
+        try {
+            return IdempotencyKeyParser.parse(Collections.list(request.getHeaders("Idempotency-Key")));
+        } catch (IllegalArgumentException exception) {
+            throw new RequestValidationException("Idempotency-Key", "must contain exactly one canonical UUID v4 value");
+        }
+    }
+
+    private void validateCollectionParameters(HttpServletRequest request) {
         for (Map.Entry<String, String[]> parameter : request.getParameterMap().entrySet()) {
             if (!COLLECTION_PARAMETERS.contains(parameter.getKey())) {
                 throw new RequestValidationException(parameter.getKey(), "is not supported");
@@ -364,22 +375,28 @@ public class ReservationController {
                 throw new RequestValidationException(parameter.getKey(), "must have exactly one nonblank value");
             }
         }
+    }
+
+    private void validatePageOffset(int page, int size) {
         if ((long) page * size > Integer.MAX_VALUE) {
             throw new RequestValidationException("page", "page offset must be at most 2147483647");
         }
-        ReservationSortField field;
+    }
+
+    private ReservationSortField parseSortField(String sort) {
         try {
-            field = ReservationSortField.fromApiName(sort);
+            return ReservationSortField.fromApiName(sort);
         } catch (IllegalArgumentException exception) {
             throw new RequestValidationException("sort", "must be a supported reservation field");
         }
-        Sort.Direction sortDirection;
+    }
+
+    private Sort.Direction parseDirection(String direction) {
         try {
-            sortDirection = Sort.Direction.fromString(direction);
+            return Sort.Direction.fromString(direction);
         } catch (IllegalArgumentException exception) {
             throw new RequestValidationException("direction", "must be asc or desc");
         }
-        return new PagedModel<>(service.list(page, size, field, sortDirection).map(converter::toResponse));
     }
 
     private void validatePeriod(LocalDate startDate, LocalDate endDate) {

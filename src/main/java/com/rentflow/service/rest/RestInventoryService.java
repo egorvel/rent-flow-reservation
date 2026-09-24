@@ -13,11 +13,11 @@ import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.rentflow.model.ReservationCreationFailure;
+import com.rentflow.model.ReservationCreationOutcome.Failure;
 import com.rentflow.service.InventoryGateway;
 import com.rentflow.service.InventoryGateway.ClaimResult;
-import com.rentflow.service.InventoryProtocolException;
-import com.rentflow.service.InventoryServiceUnavailableException;
+import com.rentflow.service.InventoryGateway.ProtocolException;
+import com.rentflow.service.InventoryGateway.ServiceUnavailableException;
 
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -58,9 +58,9 @@ public class RestInventoryService implements InventoryGateway {
         } catch (HttpClientErrorException exception) {
             return decodeClientError(exception, serialNumbers);
         } catch (CallNotPermittedException | ResourceAccessException | HttpServerErrorException exception) {
-            throw new InventoryServiceUnavailableException(exception);
+            throw new ServiceUnavailableException(exception);
         } catch (UnexpectedInventoryResponseException exception) {
-            throw new InventoryProtocolException(exception);
+            throw new ProtocolException(exception);
         }
     }
 
@@ -77,7 +77,7 @@ public class RestInventoryService implements InventoryGateway {
         try {
             problem = objectMapper.readValue(exception.getResponseBodyAsByteArray(), InventoryProblem.class);
         } catch (RuntimeException exceptionDuringDecoding) {
-            throw new InventoryProtocolException(new UnexpectedInventoryResponseException(exceptionDuringDecoding));
+            throw new ProtocolException(new UnexpectedInventoryResponseException(exceptionDuringDecoding));
         }
 
         int status = exception.getStatusCode().value();
@@ -99,16 +99,15 @@ public class RestInventoryService implements InventoryGateway {
             return ClaimResult.terminal(
                     ClaimResult.Type.UNAVAILABLE, businessFailures(problem.failedItems(), serialNumbers));
         }
-        throw new InventoryProtocolException(new UnexpectedInventoryResponseException(exception.getStatusCode()));
+        throw new ProtocolException(new UnexpectedInventoryResponseException(exception.getStatusCode()));
     }
 
-    private List<ReservationCreationFailure> invalidReferenceFailures(
-            List<InventoryViolation> violations, List<String> serialNumbers) {
-        List<ReservationCreationFailure> failures = new ArrayList<>();
+    private List<Failure> invalidReferenceFailures(List<InventoryViolation> violations, List<String> serialNumbers) {
+        List<Failure> failures = new ArrayList<>();
         for (InventoryViolation violation : violations == null ? List.<InventoryViolation>of() : violations) {
             int index = parseIndex(violation.field());
             if (index >= 0 && index < serialNumbers.size() && violation.field().endsWith(".serialNumber")) {
-                failures.add(new ReservationCreationFailure(
+                failures.add(new Failure(
                         index,
                         serialNumbers.get(index),
                         "INVALID_INVENTORY_REFERENCE",
@@ -116,36 +115,35 @@ public class RestInventoryService implements InventoryGateway {
             }
         }
         if (failures.isEmpty()) {
-            throw new InventoryProtocolException(new UnexpectedInventoryResponseException(HttpStatus.BAD_REQUEST));
+            throw new ProtocolException(new UnexpectedInventoryResponseException(HttpStatus.BAD_REQUEST));
         }
         return failures;
     }
 
-    private List<ReservationCreationFailure> businessFailures(
-            List<InventoryFailure> upstreamFailures, List<String> serialNumbers) {
+    private List<Failure> businessFailures(List<InventoryFailure> upstreamFailures, List<String> serialNumbers) {
         if (upstreamFailures == null || upstreamFailures.isEmpty()) {
-            throw new InventoryProtocolException(new UnexpectedInventoryResponseException(HttpStatus.CONFLICT));
+            throw new ProtocolException(new UnexpectedInventoryResponseException(HttpStatus.CONFLICT));
         }
-        List<ReservationCreationFailure> failures = new ArrayList<>();
+        List<Failure> failures = new ArrayList<>();
         for (InventoryFailure failure : upstreamFailures) {
             if (failure.index() < 0
                     || failure.index() >= serialNumbers.size()
                     || !serialNumbers.get(failure.index()).equals(failure.serialNumber())) {
-                throw new InventoryProtocolException(new UnexpectedInventoryResponseException(HttpStatus.CONFLICT));
+                throw new ProtocolException(new UnexpectedInventoryResponseException(HttpStatus.CONFLICT));
             }
             boolean missing = "INVENTORY_ITEM_NOT_FOUND".equals(failure.code());
             boolean unavailable = "INVALID_INVENTORY_STATUS_TRANSITION".equals(failure.code());
             if (!missing && !unavailable) {
-                throw new InventoryProtocolException(new UnexpectedInventoryResponseException(HttpStatus.CONFLICT));
+                throw new ProtocolException(new UnexpectedInventoryResponseException(HttpStatus.CONFLICT));
             }
-            failures.add(new ReservationCreationFailure(
+            failures.add(new Failure(
                     failure.index(),
                     failure.serialNumber(),
                     missing ? "INVENTORY_ITEM_NOT_FOUND" : "INVENTORY_ITEM_UNAVAILABLE",
                     missing ? "Inventory item was not found." : "Inventory item is not available."));
         }
         return failures.stream()
-                .sorted(java.util.Comparator.comparingInt(ReservationCreationFailure::index))
+                .sorted(java.util.Comparator.comparingInt(Failure::index))
                 .toList();
     }
 

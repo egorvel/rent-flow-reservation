@@ -16,6 +16,7 @@ import com.rentflow.model.ReservationCancellationOutbox;
 import com.rentflow.model.ReservationStatus;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
 import com.rentflow.repository.ReservationRepository;
+import com.rentflow.support.ReservationPropertiesFixture;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -40,7 +41,8 @@ class ReservationCancellationServiceTest {
         reservations = mock(ReservationRepository.class);
         outboxes = mock(ReservationCancellationOutboxRepository.class);
         mapper = new ObjectMapper();
-        service = new ReservationCancellationService(reservations, outboxes, mapper, 4096);
+        service = new ReservationCancellationService(
+                reservations, outboxes, mapper, ReservationPropertiesFixture.runtimeDefaults());
         when(outboxes.databaseTime()).thenReturn(DATABASE_TIME);
     }
 
@@ -102,7 +104,8 @@ class ReservationCancellationServiceTest {
         UUID reservationId = UUID.randomUUID();
         Reservation reservation = reservation(ReservationStatus.HELD);
         when(reservations.findForUpdateById(reservationId)).thenReturn(Optional.of(reservation));
-        service = new ReservationCancellationService(reservations, outboxes, mapper, 32);
+        service = new ReservationCancellationService(
+                reservations, outboxes, mapper, ReservationPropertiesFixture.runtimeWithMaxPayloadBytes(32));
 
         assertThatThrownBy(() -> service.cancel(reservationId))
                 .isInstanceOf(IllegalStateException.class)

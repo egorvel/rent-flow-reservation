@@ -6,8 +6,8 @@ import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 
-import com.rentflow.model.ReservationCommandViolation;
 import com.rentflow.model.ReservationCreationCommand;
+import com.rentflow.model.ReservationCreationOutcome.Violation;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -28,11 +28,9 @@ class ReservationCreationValidationTest {
 
         assertThat(ReservationCreationValidation.stable(command))
                 .containsExactly(
-                        new ReservationCommandViolation(
-                                "items[2].serialNumber", "must not duplicate another item serial number"),
-                        new ReservationCommandViolation("items[2].endDate", "must be on or after startDate"),
-                        new ReservationCommandViolation(
-                                "items[3].serialNumber", "must not duplicate another item serial number"));
+                        new Violation("items[2].serialNumber", "must not duplicate another item serial number"),
+                        new Violation("items[2].endDate", "must be on or after startDate"),
+                        new Violation("items[3].serialNumber", "must not duplicate another item serial number"));
     }
 
     @Test
@@ -41,8 +39,7 @@ class ReservationCreationValidationTest {
                 "customer", "order", List.of(item("past", TODAY.minusDays(1), TODAY), item("today", TODAY, TODAY)));
 
         assertThat(ReservationCreationValidation.againstAcceptedDate(command, TODAY))
-                .containsExactly(new ReservationCommandViolation(
-                        "items[0].startDate", "must be on or after the current UTC date"));
+                .containsExactly(new Violation("items[0].startDate", "must be on or after the current UTC date"));
     }
 
     @Test

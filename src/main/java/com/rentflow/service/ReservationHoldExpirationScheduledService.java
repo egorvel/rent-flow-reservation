@@ -8,7 +8,6 @@ import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -40,9 +39,14 @@ public class ReservationHoldExpirationScheduledService {
             ReservationCancellationService cancellation,
             ReservationRepository reservations,
             MeterRegistry metrics,
-            @Value("${reservation.cancellation.expiration.max-reservations-per-run:100}") int maxReservationsPerRun,
-            @Value("${reservation.cancellation.expiration.runtime-budget:5s}") Duration runtimeBudget) {
-        this(cancellation, reservations, metrics, maxReservationsPerRun, runtimeBudget, System::nanoTime);
+            ReservationRuntimeSettings settings) {
+        this(
+                cancellation,
+                reservations,
+                metrics,
+                settings.cancellation().expiration().maxReservationsPerRun(),
+                settings.cancellation().expiration().runtimeBudget(),
+                System::nanoTime);
     }
 
     ReservationHoldExpirationScheduledService(
@@ -68,7 +72,7 @@ public class ReservationHoldExpirationScheduledService {
         metrics.gauge("reservation.cancellation.expiration.oldest.age", oldestAgeSeconds);
     }
 
-    @Scheduled(fixedDelayString = "${reservation.cancellation.expiration.fixed-delay:5s}")
+    @Scheduled(fixedDelayString = "${reservation.cancellation.expiration.fixed-delay}")
     public void expire() {
         long started = nanoTime.getAsLong();
         int expired = 0;

@@ -5,6 +5,8 @@ import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 
+import com.rentflow.model.ReservationCancellationOutbox.FailureCode;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ReservationCancellationOutboxTest {
@@ -18,7 +20,7 @@ class ReservationCancellationOutboxTest {
         Instant failedAt = occurredAt.plusSeconds(1);
         Instant nextAttemptAt = occurredAt.plusSeconds(2);
 
-        outbox.recordFailure(failedAt, ReservationCancellationFailureCode.KAFKA_SEND_TIMEOUT, nextAttemptAt);
+        outbox.recordFailure(failedAt, FailureCode.KAFKA_SEND_TIMEOUT, nextAttemptAt);
         outbox.recordPublished(occurredAt.plusSeconds(3));
 
         assertThat(outbox.getEventId()).isEqualTo(eventId);
@@ -29,6 +31,6 @@ class ReservationCancellationOutboxTest {
         assertThat(outbox.getPublishedAt()).isEqualTo(occurredAt.plusSeconds(3));
         assertThat(outbox.getNextAttemptAt()).isNull();
         assertThat(outbox.getLastFailureAt()).isEqualTo(failedAt);
-        assertThat(outbox.getLastFailureCode()).isEqualTo(ReservationCancellationFailureCode.KAFKA_SEND_TIMEOUT);
+        assertThat(outbox.getLastFailureCode()).isEqualTo(FailureCode.KAFKA_SEND_TIMEOUT);
     }
 }

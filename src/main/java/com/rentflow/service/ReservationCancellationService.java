@@ -4,13 +4,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.UUID;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.rentflow.model.Reservation;
-import com.rentflow.model.ReservationCancellationEvent;
 import com.rentflow.model.ReservationCancellationOutbox;
 import com.rentflow.model.ReservationStatus;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
@@ -33,11 +31,11 @@ public class ReservationCancellationService {
             ReservationRepository reservations,
             ReservationCancellationOutboxRepository outboxes,
             ObjectMapper mapper,
-            @Value("${reservation.cancellation.max-payload-bytes:4096}") int maxPayloadBytes) {
+            ReservationRuntimeSettings settings) {
         this.reservations = reservations;
         this.outboxes = outboxes;
         this.mapper = mapper;
-        this.maxPayloadBytes = maxPayloadBytes;
+        this.maxPayloadBytes = settings.cancellation().maxPayloadBytes();
     }
 
     @Transactional
@@ -98,4 +96,7 @@ public class ReservationCancellationService {
         EMPTY,
         LOCK_BUSY
     }
+
+    private record ReservationCancellationEvent(
+            String eventId, String eventType, int eventVersion, String occurredAt, String serialNumber) {}
 }

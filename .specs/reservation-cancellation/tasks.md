@@ -1,6 +1,12 @@
 # Reservation Cancellation Implementation Tasks
 
-Status: Approved for implementation.
+Status: Implemented and verified.
+
+This is the historical completed task plan. Current internal ownership is documented in
+`design.md` §1.3 and §6: configuration is rooted at `ReservationProperties`, the event record and
+failure code are nested under their owners, and T6's cleanup behavior is implemented by the shared
+`ReservationCleanupService` and `ReservationCleanupScheduledService`. The task-level behavior and
+verification evidence remain unchanged.
 
 Each task is one safe commit in the named repository. T1–T7 describe the implemented manual
 cancellation baseline. T8–T9 belong to `rent-flow-reservation`; T10 belongs to

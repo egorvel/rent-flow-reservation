@@ -19,7 +19,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.rentflow.model.ReservationCancellationOutbox;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
-import com.rentflow.service.ReservationCancellationOutboxCleanupService;
+import com.rentflow.service.ReservationCleanupService;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -31,7 +31,7 @@ class ReservationCancellationOutboxIT extends PostgresIntegrationTest {
     private ReservationCancellationOutboxRepository outboxes;
 
     @Autowired
-    private ReservationCancellationOutboxCleanupService cleanup;
+    private ReservationCleanupService cleanup;
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -95,13 +95,13 @@ class ReservationCancellationOutboxIT extends PostgresIntegrationTest {
         UUID recentPublished = insert("CLEAN-RECENT", "29 days", true);
         UUID unpublished = insert("CLEAN-PENDING", "40 days", false);
 
-        assertThat(cleanup.countBacklog()).isOne();
-        assertThat(cleanup.deleteChunk()).isOne();
+        assertThat(cleanup.countCancellationCleanupBacklog()).isOne();
+        assertThat(cleanup.deletePublishedCancellationChunk()).isOne();
 
         assertThat(outboxes.findById(oldPublished)).isEmpty();
         assertThat(outboxes.findById(recentPublished)).isPresent();
         assertThat(outboxes.findById(unpublished)).isPresent();
-        assertThat(cleanup.countBacklog()).isZero();
+        assertThat(cleanup.countCancellationCleanupBacklog()).isZero();
     }
 
     private UUID insert(String key, String age, boolean published) {

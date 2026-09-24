@@ -40,7 +40,7 @@ public class ReservationCancellationOutbox {
 
     @Enumerated(EnumType.STRING)
     @Column(name = "last_failure_code", length = 32)
-    private ReservationCancellationFailureCode lastFailureCode;
+    private FailureCode lastFailureCode;
 
     protected ReservationCancellationOutbox() {}
 
@@ -58,8 +58,7 @@ public class ReservationCancellationOutbox {
         nextAttemptAt = null;
     }
 
-    public void recordFailure(
-            Instant failureTime, ReservationCancellationFailureCode failureCode, Instant nextAttemptTime) {
+    public void recordFailure(Instant failureTime, FailureCode failureCode, Instant nextAttemptTime) {
         attemptCount = Math.incrementExact(attemptCount);
         lastFailureAt = Objects.requireNonNull(failureTime);
         lastFailureCode = Objects.requireNonNull(failureCode);
@@ -98,7 +97,13 @@ public class ReservationCancellationOutbox {
         return lastFailureAt;
     }
 
-    public ReservationCancellationFailureCode getLastFailureCode() {
+    public FailureCode getLastFailureCode() {
         return lastFailureCode;
+    }
+
+    public enum FailureCode {
+        KAFKA_SEND_TIMEOUT,
+        KAFKA_SEND_FAILED,
+        RELAY_INTERRUPTED
     }
 }

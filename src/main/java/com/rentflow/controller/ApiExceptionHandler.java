@@ -29,8 +29,8 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.rentflow.dto.ProblemResponse;
 import com.rentflow.dto.ViolationResponse;
-import com.rentflow.service.InventoryProtocolException;
-import com.rentflow.service.InventoryServiceUnavailableException;
+import com.rentflow.service.InventoryGateway.ProtocolException;
+import com.rentflow.service.InventoryGateway.ServiceUnavailableException;
 import com.rentflow.service.ReservationNotFoundException;
 
 import tools.jackson.databind.exc.InvalidFormatException;
@@ -44,38 +44,21 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(ReservationNotFoundException.class)
     ResponseEntity<ProblemResponse> handleNotFound(ReservationNotFoundException exception, WebRequest request) {
         return response(
-                HttpStatus.NOT_FOUND,
-                "urn:rentflow:problem:reservation-not-found",
-                "Reservation not found",
+                ApiProblem.RESERVATION_NOT_FOUND,
                 "Reservation with ID '" + exception.getId() + "' was not found.",
-                "RESERVATION_NOT_FOUND",
                 request,
                 List.of());
     }
 
-    @ExceptionHandler(InventoryServiceUnavailableException.class)
+    @ExceptionHandler(ServiceUnavailableException.class)
     ResponseEntity<ProblemResponse> handleInventoryUnavailable(
-            InventoryServiceUnavailableException exception, WebRequest request) {
-        return response(
-                HttpStatus.SERVICE_UNAVAILABLE,
-                "urn:rentflow:problem:inventory-service-unavailable",
-                "Inventory service unavailable",
-                "Inventory is temporarily unavailable; retry this request with the same key.",
-                "INVENTORY_SERVICE_UNAVAILABLE",
-                request,
-                List.of());
+            ServiceUnavailableException exception, WebRequest request) {
+        return response(ApiProblem.INVENTORY_SERVICE_UNAVAILABLE, request, List.of());
     }
 
-    @ExceptionHandler(InventoryProtocolException.class)
-    ResponseEntity<ProblemResponse> handleInventoryProtocol(InventoryProtocolException exception, WebRequest request) {
-        return response(
-                HttpStatus.BAD_GATEWAY,
-                "urn:rentflow:problem:inventory-service-error",
-                "Inventory service error",
-                "Inventory returned an unexpected response.",
-                "INVENTORY_SERVICE_ERROR",
-                request,
-                List.of());
+    @ExceptionHandler(ProtocolException.class)
+    ResponseEntity<ProblemResponse> handleInventoryProtocol(ProtocolException exception, WebRequest request) {
+        return response(ApiProblem.INVENTORY_SERVICE_ERROR, request, List.of());
     }
 
     @ExceptionHandler(ConstraintViolationException.class)
@@ -137,14 +120,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             return objectResponse(validationProblem(violations, request), HttpStatus.BAD_REQUEST);
         }
 
-        ProblemResponse problem = problem(
-                HttpStatus.BAD_REQUEST,
-                "urn:rentflow:problem:malformed-json",
-                "Malformed JSON",
-                "The request body could not be read.",
-                "MALFORMED_JSON",
-                request,
-                List.of());
+        ProblemResponse problem = problem(ApiProblem.MALFORMED_JSON, request, List.of());
         return objectResponse(problem, HttpStatus.BAD_REQUEST);
     }
 
@@ -154,14 +130,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             HttpHeaders headers,
             HttpStatusCode status,
             WebRequest request) {
-        ProblemResponse problem = problem(
-                HttpStatus.METHOD_NOT_ALLOWED,
-                "urn:rentflow:problem:method-not-allowed",
-                "Method not allowed",
-                "The HTTP method is not supported for this resource.",
-                "METHOD_NOT_ALLOWED",
-                request,
-                List.of());
+        ProblemResponse problem = problem(ApiProblem.METHOD_NOT_ALLOWED, request, List.of());
         return objectResponse(problem, status, headers);
     }
 
@@ -171,14 +140,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             HttpHeaders headers,
             HttpStatusCode status,
             WebRequest request) {
-        ProblemResponse problem = problem(
-                HttpStatus.NOT_ACCEPTABLE,
-                "urn:rentflow:problem:not-acceptable",
-                "Not acceptable",
-                "No acceptable response representation is available.",
-                "NOT_ACCEPTABLE",
-                request,
-                List.of());
+        ProblemResponse problem = problem(ApiProblem.NOT_ACCEPTABLE, request, List.of());
         return objectResponse(problem, status, headers);
     }
 
@@ -188,14 +150,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             HttpHeaders headers,
             HttpStatusCode status,
             WebRequest request) {
-        ProblemResponse problem = problem(
-                HttpStatus.UNSUPPORTED_MEDIA_TYPE,
-                "urn:rentflow:problem:unsupported-media-type",
-                "Unsupported media type",
-                "The request media type is not supported.",
-                "UNSUPPORTED_MEDIA_TYPE",
-                request,
-                List.of());
+        ProblemResponse problem = problem(ApiProblem.UNSUPPORTED_MEDIA_TYPE, request, List.of());
         return objectResponse(problem, status, headers);
     }
 
@@ -215,14 +170,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     protected ResponseEntity<Object> handleExceptionInternal(
             Exception exception, Object body, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
         if (status.is4xxClientError()) {
-            ProblemResponse problem = problem(
-                    status,
-                    "urn:rentflow:problem:http-error",
-                    "Request failed",
-                    "The request could not be processed.",
-                    "HTTP_ERROR",
-                    request,
-                    List.of());
+            ProblemResponse problem = problem(status, ApiProblem.HTTP_ERROR, request, List.of());
             return objectResponse(problem, status, headers);
         }
         return objectResponse(internalError(request), HttpStatus.INTERNAL_SERVER_ERROR, headers);
@@ -250,27 +198,19 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     private ProblemResponse validationProblem(List<ViolationResponse> violations, WebRequest request) {
-        return problem(
-                HttpStatus.BAD_REQUEST,
-                "urn:rentflow:problem:validation-failed",
-                "Request validation failed",
-                "One or more request values are invalid.",
-                "VALIDATION_FAILED",
-                request,
-                violations);
+        return problem(ApiProblem.VALIDATION_FAILED, request, violations);
     }
 
     private ResponseEntity<ProblemResponse> response(
-            HttpStatus status,
-            String type,
-            String title,
-            String detail,
-            String code,
-            WebRequest request,
-            List<ViolationResponse> violations) {
-        return ResponseEntity.status(status)
+            ApiProblem problem, WebRequest request, List<ViolationResponse> violations) {
+        return response(problem, problem.detail(), request, violations);
+    }
+
+    private ResponseEntity<ProblemResponse> response(
+            ApiProblem problem, String detail, WebRequest request, List<ViolationResponse> violations) {
+        return ResponseEntity.status(problem.status())
                 .contentType(MediaType.APPLICATION_PROBLEM_JSON)
-                .body(problem(status, type, title, detail, code, request, violations));
+                .body(problem(problem, detail, request, violations));
     }
 
     private ResponseEntity<Object> objectResponse(ProblemResponse problem, HttpStatus status) {
@@ -287,37 +227,40 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     private ResponseEntity<Object> resourceNotFound(HttpStatusCode status, HttpHeaders headers, WebRequest request) {
-        ProblemResponse problem = problem(
-                HttpStatus.NOT_FOUND,
-                "urn:rentflow:problem:resource-not-found",
-                "Resource not found",
-                "The requested resource was not found.",
-                "RESOURCE_NOT_FOUND",
-                request,
-                List.of());
+        ProblemResponse problem = problem(ApiProblem.RESOURCE_NOT_FOUND, request, List.of());
         return objectResponse(problem, status, headers);
     }
 
     private ProblemResponse internalError(WebRequest request) {
-        return problem(
-                HttpStatus.INTERNAL_SERVER_ERROR,
-                "urn:rentflow:problem:internal-error",
-                "Internal server error",
-                "An unexpected error occurred.",
-                "INTERNAL_ERROR",
-                request,
-                List.of());
+        return problem(ApiProblem.INTERNAL_ERROR, request, List.of());
+    }
+
+    private ProblemResponse problem(ApiProblem problem, WebRequest request, List<ViolationResponse> violations) {
+        return problem(problem, problem.detail(), request, violations);
     }
 
     private ProblemResponse problem(
-            HttpStatusCode status,
-            String type,
-            String title,
-            String detail,
-            String code,
-            WebRequest request,
-            List<ViolationResponse> violations) {
-        return new ProblemResponse(type, title, status.value(), detail, requestPath(request), code, violations);
+            ApiProblem problem, String detail, WebRequest request, List<ViolationResponse> violations) {
+        return new ProblemResponse(
+                problem.type(),
+                problem.title(),
+                problem.status().value(),
+                detail,
+                requestPath(request),
+                problem.code(),
+                violations);
+    }
+
+    private ProblemResponse problem(
+            HttpStatusCode status, ApiProblem problem, WebRequest request, List<ViolationResponse> violations) {
+        return new ProblemResponse(
+                problem.type(),
+                problem.title(),
+                status.value(),
+                problem.detail(),
+                requestPath(request),
+                problem.code(),
+                violations);
     }
 
     private String requestPath(WebRequest request) {
@@ -356,5 +299,108 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             current = current.getCause();
         }
         return null;
+    }
+
+    private enum ApiProblem {
+        RESERVATION_NOT_FOUND(
+                HttpStatus.NOT_FOUND,
+                "reservation-not-found",
+                "Reservation not found",
+                "Reservation was not found.",
+                "RESERVATION_NOT_FOUND"),
+        INVENTORY_SERVICE_UNAVAILABLE(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "inventory-service-unavailable",
+                "Inventory service unavailable",
+                "Inventory is temporarily unavailable; retry this request with the same key.",
+                "INVENTORY_SERVICE_UNAVAILABLE"),
+        INVENTORY_SERVICE_ERROR(
+                HttpStatus.BAD_GATEWAY,
+                "inventory-service-error",
+                "Inventory service error",
+                "Inventory returned an unexpected response.",
+                "INVENTORY_SERVICE_ERROR"),
+        VALIDATION_FAILED(
+                HttpStatus.BAD_REQUEST,
+                "validation-failed",
+                "Request validation failed",
+                "One or more request values are invalid.",
+                "VALIDATION_FAILED"),
+        MALFORMED_JSON(
+                HttpStatus.BAD_REQUEST,
+                "malformed-json",
+                "Malformed JSON",
+                "The request body could not be read.",
+                "MALFORMED_JSON"),
+        METHOD_NOT_ALLOWED(
+                HttpStatus.METHOD_NOT_ALLOWED,
+                "method-not-allowed",
+                "Method not allowed",
+                "The HTTP method is not supported for this resource.",
+                "METHOD_NOT_ALLOWED"),
+        NOT_ACCEPTABLE(
+                HttpStatus.NOT_ACCEPTABLE,
+                "not-acceptable",
+                "Not acceptable",
+                "No acceptable response representation is available.",
+                "NOT_ACCEPTABLE"),
+        UNSUPPORTED_MEDIA_TYPE(
+                HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                "unsupported-media-type",
+                "Unsupported media type",
+                "The request media type is not supported.",
+                "UNSUPPORTED_MEDIA_TYPE"),
+        RESOURCE_NOT_FOUND(
+                HttpStatus.NOT_FOUND,
+                "resource-not-found",
+                "Resource not found",
+                "The requested resource was not found.",
+                "RESOURCE_NOT_FOUND"),
+        HTTP_ERROR(
+                HttpStatus.BAD_REQUEST,
+                "http-error",
+                "Request failed",
+                "The request could not be processed.",
+                "HTTP_ERROR"),
+        INTERNAL_ERROR(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "internal-error",
+                "Internal server error",
+                "An unexpected error occurred.",
+                "INTERNAL_ERROR");
+
+        private final HttpStatus status;
+        private final String type;
+        private final String title;
+        private final String detail;
+        private final String code;
+
+        ApiProblem(HttpStatus status, String typeSuffix, String title, String detail, String code) {
+            this.status = status;
+            this.type = "urn:rentflow:problem:" + typeSuffix;
+            this.title = title;
+            this.detail = detail;
+            this.code = code;
+        }
+
+        HttpStatus status() {
+            return status;
+        }
+
+        String type() {
+            return type;
+        }
+
+        String title() {
+            return title;
+        }
+
+        String detail() {
+            return detail;
+        }
+
+        String code() {
+            return code;
+        }
     }
 }

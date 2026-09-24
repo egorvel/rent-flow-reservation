@@ -10,8 +10,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.annotation.Scheduled;
 
-import com.rentflow.model.ReservationCancellationFailureCode;
+import com.rentflow.model.ReservationCancellationOutbox.FailureCode;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
+import com.rentflow.support.ReservationPropertiesFixture;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
@@ -42,7 +43,7 @@ class ReservationCancellationOutboxRelayScheduledServiceTest {
 
         Scheduled scheduled = method.getAnnotation(Scheduled.class);
 
-        assertThat(scheduled.fixedDelayString()).isEqualTo("${reservation.cancellation.relay.fixed-delay:1s}");
+        assertThat(scheduled.fixedDelayString()).isEqualTo("${reservation.cancellation.relay.fixed-delay}");
     }
 
     @Test
@@ -93,7 +94,7 @@ class ReservationCancellationOutboxRelayScheduledServiceTest {
                         ReservationCancellationOutboxRelayService.Status.INTERRUPTED,
                         UUID.randomUUID(),
                         1,
-                        ReservationCancellationFailureCode.RELAY_INTERRUPTED,
+                        FailureCode.RELAY_INTERRUPTED,
                         Instant.parse("2026-09-21T15:30:01Z"),
                         false);
         when(relay.publishOldest()).thenReturn(interrupted);
@@ -110,6 +111,9 @@ class ReservationCancellationOutboxRelayScheduledServiceTest {
 
     private ReservationCancellationOutboxRelayScheduledService scheduler(int maxEvents) {
         return new ReservationCancellationOutboxRelayScheduledService(
-                relay, outboxes, metrics, maxEvents, Duration.ofSeconds(5));
+                relay,
+                outboxes,
+                metrics,
+                ReservationPropertiesFixture.runtimeWithRelayLimits(maxEvents, Duration.ofSeconds(5)));
     }
 }
