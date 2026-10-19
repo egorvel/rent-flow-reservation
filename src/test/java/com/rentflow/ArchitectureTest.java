@@ -5,6 +5,7 @@ import java.util.List;
 import jakarta.persistence.Entity;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -55,6 +56,8 @@ class ArchitectureTest {
                 .definedBy("..repository..")
                 .layer("Model")
                 .definedBy("..model..")
+                .layer("Properties")
+                .definedBy("..properties..")
                 .optionalLayer("Config")
                 .definedBy("..config..")
                 .optionalLayer("Util")
@@ -66,13 +69,15 @@ class ArchitectureTest {
                 .whereLayer("Dto")
                 .mayNotAccessAnyLayer()
                 .whereLayer("Service")
-                .mayOnlyAccessLayers("Model", "Repository")
+                .mayOnlyAccessLayers("Model", "Repository", "Properties")
                 .whereLayer("Repository")
                 .mayOnlyAccessLayers("Model")
                 .whereLayer("Model")
                 .mayNotAccessAnyLayer()
                 .whereLayer("Config")
-                .mayOnlyAccessLayers("Dto", "Service")
+                .mayOnlyAccessLayers("Dto", "Service", "Properties")
+                .whereLayer("Properties")
+                .mayNotAccessAnyLayer()
                 .whereLayer("Util")
                 .mayNotAccessAnyLayer()
                 .check(PRODUCTION_CLASSES);
@@ -92,6 +97,7 @@ class ArchitectureTest {
                         "..converter..",
                         "..dto..",
                         "..model..",
+                        "..properties..",
                         "..repository..",
                         "..service..",
                         "..util..")
@@ -116,6 +122,14 @@ class ArchitectureTest {
 
     @Test
     void componentsUseTheirDefinedPackagesAndSuffixes() {
+        classes()
+                .that()
+                .areAnnotatedWith(ConfigurationProperties.class)
+                .should()
+                .resideInAPackage("..properties..")
+                .andShould()
+                .haveSimpleNameEndingWith("Properties")
+                .check(PRODUCTION_CLASSES);
         classes()
                 .that()
                 .areAnnotatedWith(RestController.class)

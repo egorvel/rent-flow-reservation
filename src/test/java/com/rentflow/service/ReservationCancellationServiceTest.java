@@ -45,7 +45,7 @@ class ReservationCancellationServiceTest {
                 reservations,
                 outboxes,
                 mapper,
-                ReservationPropertiesFixture.runtimeDefaults(),
+                ReservationPropertiesFixture.defaults(),
                 io.micrometer.tracing.Tracer.NOOP,
                 io.micrometer.tracing.propagation.Propagator.NOOP);
         when(outboxes.databaseTime()).thenReturn(DATABASE_TIME);
@@ -104,7 +104,7 @@ class ReservationCancellationServiceTest {
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.any());
         ReservationCancellationService observed = new ReservationCancellationService(
-                reservations, outboxes, mapper, ReservationPropertiesFixture.runtimeDefaults(), tracer, propagator);
+                reservations, outboxes, mapper, ReservationPropertiesFixture.defaults(), tracer, propagator);
         UUID id = UUID.randomUUID();
         Reservation reservation = reservation(ReservationStatus.HELD);
         when(reservations.findForUpdateById(id)).thenReturn(Optional.of(reservation));
@@ -149,7 +149,7 @@ class ReservationCancellationServiceTest {
                 reservations,
                 outboxes,
                 mapper,
-                ReservationPropertiesFixture.runtimeWithMaxPayloadBytes(32),
+                ReservationPropertiesFixture.withMaxPayloadBytes(32),
                 io.micrometer.tracing.Tracer.NOOP,
                 io.micrometer.tracing.propagation.Propagator.NOOP);
 

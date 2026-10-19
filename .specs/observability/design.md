@@ -21,10 +21,11 @@ worker-dependent backlog measurement and omission of exception messages/stacks. 
 outbox context columns without changing event identity, occurrence time, payload or key. Preserve
 PUT/DELETE behavior, including their existing absence of cancellation-event semantics.
 
-Keep existing packages and layer boundaries. Inject Micrometer APIs into the existing services;
-keep configuration in config, repository access in services and outbox context fields in model.
-Do not introduce a general telemetry facade, Spring Security, new layer exception, independent
-tracing SDK or architecture-test relaxation. Small private helpers or service-local context
+Inject Micrometer APIs into the existing services; keep bean wiring in config, validated
+configuration data in properties, repository access in services and outbox context fields in model.
+Services and config may depend on properties; properties have no application-layer dependencies,
+and services cannot depend on config. Do not introduce a general telemetry facade, Spring Security,
+new layer exception, independent tracing SDK or architecture-test relaxation. Small private helpers or service-local context
 records are sufficient. Use explicit Java local types and existing Mockito/Testcontainers styles.
 
 ## 2. Application baseline

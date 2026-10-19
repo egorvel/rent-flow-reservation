@@ -28,12 +28,7 @@ class ReservationMonitoringServiceTest {
         when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
         SimpleMeterRegistry metrics = new SimpleMeterRegistry();
         ReservationMonitoringService service = new ReservationMonitoringService(
-                creation,
-                outboxes,
-                reservations,
-                metrics,
-                transactions,
-                ReservationPropertiesFixture.runtimeDefaults());
+                creation, outboxes, reservations, metrics, transactions, ReservationPropertiesFixture.defaults());
         verifyNoInteractions(creation, outboxes, reservations);
         metrics.getMeters().forEach(meter -> meter.measure().iterator().forEachRemaining(ignored -> {}));
         verifyNoInteractions(creation, outboxes, reservations);

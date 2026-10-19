@@ -83,12 +83,13 @@ ReservationHoldExpirationScheduledService [five-second fixed delay]
 - `ReservationCancellationOutboxRelayScheduledService` bounds draining and records relay metrics.
 - `ReservationCleanupService` and its scheduler share bounded-loop orchestration with creation
   cleanup while retaining explicit cancellation operations for acknowledged events.
-- Root `ReservationProperties` binds and validates creation and cancellation keys;
-  `ReservationServiceConfig` maps the service subset into `ReservationRuntimeSettings`, while
-  `ReservationKafkaConfig` owns producer and local-topic configuration.
+- Root `ReservationProperties` in `properties` binds and validates creation and cancellation keys.
+  `ReservationApplication` registers it with `@EnableConfigurationProperties`; services inject it
+  directly, while `ReservationKafkaConfig` owns producer and local-topic configuration.
 
-All types stay in the existing `controller`, `service`, `repository`, `model`, and `config`
-packages. No new architectural layer or shared event library is introduced.
+Types use the `controller`, `service`, `repository`, `model`, `config`, and `properties` packages.
+Services and config may depend on properties, which have no application-layer dependencies;
+services cannot depend on config. No shared event library is introduced.
 
 ## 2. HTTP contract and cancellation transaction
 

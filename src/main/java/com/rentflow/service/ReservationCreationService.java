@@ -26,6 +26,7 @@ import com.rentflow.model.ReservationCreationOutcome.Snapshot;
 import com.rentflow.model.ReservationCreationOutcome.Violation;
 import com.rentflow.model.ReservationCreationRequest;
 import com.rentflow.model.ReservationStatus;
+import com.rentflow.properties.ReservationProperties;
 import com.rentflow.repository.ReservationCreationRequestRepository;
 import com.rentflow.repository.ReservationRepository;
 import com.rentflow.service.InventoryGateway.ClaimResult;
@@ -61,13 +62,13 @@ public class ReservationCreationService {
             InventoryGateway inventory,
             MeterRegistry metrics,
             ObservationRegistry observations,
-            ReservationRuntimeSettings settings) {
+            ReservationProperties properties) {
         this.creationRequests = creationRequests;
         this.reservations = reservations;
         this.inventory = inventory;
         this.metrics = metrics;
         this.observations = observations;
-        this.holdDuration = settings.cancellation().expiration().holdDuration();
+        this.holdDuration = properties.cancellation().expiration().holdDuration();
     }
 
     @Transactional

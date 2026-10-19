@@ -14,18 +14,22 @@ The Pricing baseline has no need here for its Inventory integration or resilienc
 ### 1.2 Layers
 
 Controllers depend on services, converters and DTOs. Converters map DTOs and models. Services
-depend on repositories and models. Repositories depend on models. DTOs and models have no
-application-layer dependencies. Config may depend on DTOs and services. Utils are optional and
-independent. Use the packages prescribed by AGENTS.md and the existing Pricing ArchUnit style.
+depend on repositories, models and properties. Repositories depend on models. DTOs, models and
+properties have no application-layer dependencies. Config may depend on DTOs, services and
+properties. Utils are optional and independent. Use the packages prescribed by AGENTS.md and the
+existing Pricing ArchUnit style.
 All unit tests run without Spring; use Mockito only for collaborators. No Security, H2, Lombok,
 MapStruct, or new framework is needed. The API and docs are unauthenticated (AC7.5).
 
-Configuration binding remains in the `config` package. The validated root `ReservationProperties`
-hierarchy binds the `reservation` prefix, and `ReservationServiceConfig` projects those values into
-the service-owned immutable `ReservationRuntimeSettings`. Services consume that projection rather
-than depending on the config package, preserving the ArchUnit direction `config -> service` and
-avoiding a package cycle. `application.yaml` owns defaults; scheduled annotations contain only
-property placeholders.
+Configuration data lives in the `properties` package. The validated root `ReservationProperties`
+hierarchy binds the `reservation` prefix and is registered once by `@EnableConfigurationProperties`
+on `ReservationApplication`. Services and configuration beans inject the same immutable, validated
+properties directly. The `config` package retains bean wiring; services cannot depend on it, and
+properties cannot depend on other application layers. No projection or mapping bean is needed.
+ArchUnit enforces these dependencies and requires configuration properties to use the properties
+package and `Properties` suffix. `application.yaml` owns defaults; scheduled annotations contain
+only property placeholders. Integration coverage verifies registration, binding and overrides;
+unit coverage verifies property validation without a Spring context.
 
 ## 2. Resource, storage, and validation
 

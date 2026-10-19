@@ -1,4 +1,4 @@
-package com.rentflow.config;
+package com.rentflow.properties;
 
 import java.time.Duration;
 import jakarta.validation.Validation;
@@ -6,7 +6,6 @@ import jakarta.validation.Validator;
 
 import org.junit.jupiter.api.Test;
 
-import com.rentflow.service.ReservationRuntimeSettings;
 import com.rentflow.support.ReservationPropertiesFixture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -19,28 +18,6 @@ class ReservationPropertiesTest {
     @Test
     void acceptsTheProductionDefaults() {
         assertThat(validator.validate(ReservationPropertiesFixture.defaults())).isEmpty();
-    }
-
-    @Test
-    void projectsValidatedPropertiesIntoServiceSettings() {
-        ReservationRuntimeSettings settings =
-                new ReservationServiceConfig().reservationRuntimeSettings(ReservationPropertiesFixture.defaults());
-
-        assertThat(settings.creation().cleanup().runtimeBudget()).isEqualTo(Duration.ofSeconds(60));
-        assertThat(settings.cancellation().topic()).isEqualTo("rentflow.reservation.cancelled.v1");
-        assertThat(settings.cancellation().maxPayloadBytes()).isEqualTo(4096);
-        assertThat(settings.cancellation().relay())
-                .isEqualTo(new ReservationRuntimeSettings.Cancellation.Relay(
-                        Duration.ofSeconds(5), 100, Duration.ofSeconds(50)));
-        assertThat(settings.cancellation().retry())
-                .isEqualTo(new ReservationRuntimeSettings.Cancellation.Retry(
-                        Duration.ofSeconds(1), 2, Duration.ofMinutes(5), 0.2));
-        assertThat(settings.cancellation().cleanup())
-                .isEqualTo(new ReservationRuntimeSettings.Cancellation.Cleanup(true, Duration.ofSeconds(60)));
-        assertThat(settings.cancellation().expiration())
-                .isEqualTo(new ReservationRuntimeSettings.Cancellation.Expiration(
-                        Duration.ofMinutes(10), Duration.ofSeconds(5), 100));
-        assertThat(settings.observability().queryTimeout()).isEqualTo(Duration.ofSeconds(5));
     }
 
     @Test

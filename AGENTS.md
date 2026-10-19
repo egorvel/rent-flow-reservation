@@ -66,6 +66,7 @@ Reservation service. Owns time-based availability and temporary holds.
 
 **Layout**
 - Java configs: : `src/main/java/com/rentflow/config`
+- Properties: `src/main/java/com/rentflow/properties`
 - Controllers: `src/main/java/com/rentflow/controller`
 - Converters: `src/main/java/com/rentflow/converter`
 - DTOs: `src/main/java/com/rentflow/dto`

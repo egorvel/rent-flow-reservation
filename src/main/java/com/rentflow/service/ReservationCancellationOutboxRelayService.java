@@ -25,6 +25,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import com.rentflow.model.ReservationCancellationOutbox;
 import com.rentflow.model.ReservationCancellationOutbox.FailureCode;
+import com.rentflow.properties.ReservationProperties;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
 
 import io.micrometer.core.instrument.MeterRegistry;
@@ -58,12 +59,12 @@ public class ReservationCancellationOutboxRelayService {
     public ReservationCancellationOutboxRelayService(
             ReservationCancellationOutboxRepository outboxes,
             KafkaTemplate<byte[], byte[]> kafka,
-            ReservationRuntimeSettings settings,
+            ReservationProperties properties,
             Tracer tracer,
             OpenTelemetry openTelemetry,
             ObservationRegistry observations,
             MeterRegistry metrics) {
-        ReservationRuntimeSettings.Cancellation cancellation = settings.cancellation();
+        ReservationProperties.Cancellation cancellation = properties.cancellation();
         this.outboxes = outboxes;
         this.kafka = kafka;
         this.topic = cancellation.topic();

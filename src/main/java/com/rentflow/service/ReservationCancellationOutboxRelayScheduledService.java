@@ -9,6 +9,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import com.rentflow.properties.ReservationProperties;
+
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
@@ -31,11 +33,11 @@ public class ReservationCancellationOutboxRelayScheduledService {
     public ReservationCancellationOutboxRelayScheduledService(
             ReservationCancellationOutboxRelayService relay,
             MeterRegistry metrics,
-            ReservationRuntimeSettings settings,
+            ReservationProperties properties,
             ObservationRegistry observations,
             Clock clock) {
-        ReservationRuntimeSettings.Cancellation.Relay relaySettings =
-                settings.cancellation().relay();
+        ReservationProperties.Cancellation.Relay relaySettings =
+                properties.cancellation().relay();
         this.relay = relay;
         this.metrics = metrics;
         this.observations = observations;

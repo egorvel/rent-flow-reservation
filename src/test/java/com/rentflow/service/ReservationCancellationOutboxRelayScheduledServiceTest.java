@@ -119,7 +119,7 @@ class ReservationCancellationOutboxRelayScheduledServiceTest {
         return new ReservationCancellationOutboxRelayScheduledService(
                 relay,
                 metrics,
-                ReservationPropertiesFixture.runtimeWithRelayLimits(maxEvents, Duration.ofSeconds(5)),
+                ReservationPropertiesFixture.withRelayLimits(maxEvents, Duration.ofSeconds(5)),
                 observations,
                 java.time.Clock.systemUTC());
     }

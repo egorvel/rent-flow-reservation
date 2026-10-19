@@ -49,12 +49,7 @@ class ReservationCreationServiceTest {
     void setUp() {
         observations.observationConfig().observationHandler(new DefaultMeterObservationHandler(metrics));
         service = new ReservationCreationService(
-                requests,
-                reservations,
-                inventory,
-                metrics,
-                observations,
-                ReservationPropertiesFixture.runtimeDefaults());
+                requests, reservations, inventory, metrics, observations, ReservationPropertiesFixture.defaults());
         when(requests.tryExecutionLock(anyLong())).thenReturn(true);
         when(requests.databaseTime()).thenReturn(Instant.parse("2026-10-01T00:00:00Z"));
         when(requests.databaseUtcDate()).thenReturn(LocalDate.of(2026, 10, 1));
@@ -191,12 +186,7 @@ class ReservationCreationServiceTest {
             }
         };
         ReservationCreationService observed = new ReservationCreationService(
-                requests,
-                reservations,
-                inventory,
-                failing,
-                observations,
-                ReservationPropertiesFixture.runtimeDefaults());
+                requests, reservations, inventory, failing, observations, ReservationPropertiesFixture.defaults());
         assertThat(observed.create(UUID.randomUUID(), command).status()).isEqualTo(201);
         org.assertj.core.api.Assertions.assertThatCode(() -> TransactionSynchronizationManager.getSynchronizations()
                         .forEach(TransactionSynchronization::afterCommit))

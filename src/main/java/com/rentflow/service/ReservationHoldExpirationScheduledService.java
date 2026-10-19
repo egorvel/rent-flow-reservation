@@ -12,6 +12,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import com.rentflow.properties.ReservationProperties;
+
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
@@ -38,14 +40,14 @@ public class ReservationHoldExpirationScheduledService {
     public ReservationHoldExpirationScheduledService(
             ReservationCancellationService cancellation,
             MeterRegistry metrics,
-            ReservationRuntimeSettings settings,
+            ReservationProperties properties,
             ObservationRegistry observations,
             Clock clock) {
         this(
                 cancellation,
                 metrics,
-                settings.cancellation().expiration().maxReservationsPerRun(),
-                settings.cancellation().expiration().runtimeBudget(),
+                properties.cancellation().expiration().maxReservationsPerRun(),
+                properties.cancellation().expiration().runtimeBudget(),
                 System::nanoTime,
                 observations,
                 clock);

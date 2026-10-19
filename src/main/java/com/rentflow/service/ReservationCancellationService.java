@@ -17,6 +17,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCancellationOutbox;
 import com.rentflow.model.ReservationStatus;
+import com.rentflow.properties.ReservationProperties;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
 import com.rentflow.repository.ReservationRepository;
 
@@ -43,13 +44,13 @@ public class ReservationCancellationService {
             ReservationRepository reservations,
             ReservationCancellationOutboxRepository outboxes,
             ObjectMapper mapper,
-            ReservationRuntimeSettings settings,
+            ReservationProperties properties,
             Tracer tracer,
             Propagator propagator) {
         this.reservations = reservations;
         this.outboxes = outboxes;
         this.mapper = mapper;
-        this.maxPayloadBytes = settings.cancellation().maxPayloadBytes();
+        this.maxPayloadBytes = properties.cancellation().maxPayloadBytes();
         this.tracer = tracer;
         this.propagator = propagator;
     }

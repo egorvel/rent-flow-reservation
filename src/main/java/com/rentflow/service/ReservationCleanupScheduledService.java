@@ -12,6 +12,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import com.rentflow.properties.ReservationProperties;
+
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.observation.Observation;
@@ -39,15 +41,15 @@ public class ReservationCleanupScheduledService {
     public ReservationCleanupScheduledService(
             ReservationCleanupService cleanup,
             MeterRegistry metrics,
-            ReservationRuntimeSettings settings,
+            ReservationProperties properties,
             ObservationRegistry observations,
             Clock clock) {
         this(
                 cleanup,
                 metrics,
-                settings.creation().cleanup().runtimeBudget(),
-                settings.cancellation().cleanup().runtimeBudget(),
-                settings.cancellation().cleanup().enabled(),
+                properties.creation().cleanup().runtimeBudget(),
+                properties.cancellation().cleanup().runtimeBudget(),
+                properties.cancellation().cleanup().enabled(),
                 System::nanoTime,
                 observations,
                 clock);

@@ -12,6 +12,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.rentflow.model.ReservationBacklog;
+import com.rentflow.properties.ReservationProperties;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
 import com.rentflow.repository.ReservationCreationRequestRepository;
 import com.rentflow.repository.ReservationRepository;
@@ -39,12 +40,12 @@ public class ReservationMonitoringService {
             ReservationRepository reservations,
             MeterRegistry metrics,
             PlatformTransactionManager transactions,
-            ReservationRuntimeSettings settings) {
+            ReservationProperties properties) {
         this.creationRequests = creationRequests;
         this.outboxes = outboxes;
         this.reservations = reservations;
         this.metrics = metrics;
-        this.queryTimeout = settings.observability().queryTimeout();
+        this.queryTimeout = properties.observability().queryTimeout();
         transaction = new TransactionTemplate(transactions);
         transaction.setReadOnly(true);
         long timeoutSeconds = Math.ceilDiv(queryTimeout.toMillis(), 1000);

@@ -1,4 +1,4 @@
-package com.rentflow.config;
+package com.rentflow.properties;
 
 import java.time.Duration;
 import jakarta.validation.Valid;

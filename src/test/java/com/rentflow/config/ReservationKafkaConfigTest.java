@@ -4,6 +4,7 @@ import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.config.TopicConfig;
 import org.junit.jupiter.api.Test;
 
+import com.rentflow.properties.ReservationProperties;
 import com.rentflow.support.ReservationPropertiesFixture;
 
 import static org.assertj.core.api.Assertions.assertThat;

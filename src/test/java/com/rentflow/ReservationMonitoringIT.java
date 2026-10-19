@@ -19,6 +19,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCancellationOutbox;
+import com.rentflow.properties.ReservationProperties;
 import com.rentflow.repository.ReservationCancellationOutboxRepository;
 import com.rentflow.repository.ReservationRepository;
 import com.rentflow.service.ReservationMonitoringService;
@@ -36,6 +37,9 @@ import static org.assertj.core.api.Assertions.assertThat;
         })
 @AutoConfigureMetrics
 class ReservationMonitoringIT extends PostgresIntegrationTest {
+    @Autowired
+    private ReservationProperties properties;
+
     @Autowired
     private ReservationMonitoringService monitoring;
 
@@ -56,6 +60,29 @@ class ReservationMonitoringIT extends PostgresIntegrationTest {
 
     @Autowired
     @Qualifier("reservationMonitoringTaskScheduler") private ThreadPoolTaskScheduler monitors;
+
+    @Test
+    void bindsReservationPropertiesFromConfigurationAndOverrides() {
+        assertThat(properties.creation().cleanup())
+                .isEqualTo(new ReservationProperties.Creation.Cleanup("0 0 3 * * *", Duration.ofSeconds(60)));
+        assertThat(properties.cancellation().topic()).isEqualTo("rentflow.reservation.cancelled.v1");
+        assertThat(properties.cancellation().maxPayloadBytes()).isEqualTo(4096);
+        assertThat(properties.cancellation().relay())
+                .isEqualTo(new ReservationProperties.Cancellation.Relay(
+                        false, Duration.ofSeconds(1), Duration.ofSeconds(5), 100, Duration.ofSeconds(50)));
+        assertThat(properties.cancellation().retry())
+                .isEqualTo(new ReservationProperties.Cancellation.Retry(
+                        Duration.ofSeconds(1), 2, Duration.ofMinutes(5), 0.2));
+        assertThat(properties.cancellation().cleanup())
+                .isEqualTo(
+                        new ReservationProperties.Cancellation.Cleanup(false, "0 30 3 * * *", Duration.ofSeconds(60)));
+        assertThat(properties.cancellation().expiration())
+                .isEqualTo(new ReservationProperties.Cancellation.Expiration(
+                        false, Duration.ofMinutes(10), Duration.ofSeconds(5), Duration.ofSeconds(5), 100));
+        assertThat(properties.observability())
+                .isEqualTo(new ReservationProperties.Observability(
+                        Duration.ofSeconds(15), Duration.ofMinutes(1), Duration.ofMillis(200)));
+    }
 
     @Test
     void disabledWorkersStillMeasureDatabaseBacklogsAndClockAges() {

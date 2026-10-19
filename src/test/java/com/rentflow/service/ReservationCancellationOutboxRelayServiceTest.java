@@ -39,7 +39,7 @@ class ReservationCancellationOutboxRelayServiceTest {
         service = new ReservationCancellationOutboxRelayService(
                 outboxes,
                 kafka,
-                ReservationPropertiesFixture.runtimeDefaults(),
+                ReservationPropertiesFixture.defaults(),
                 io.micrometer.tracing.Tracer.NOOP,
                 io.opentelemetry.api.OpenTelemetry.noop(),
                 io.micrometer.observation.ObservationRegistry.NOOP,
