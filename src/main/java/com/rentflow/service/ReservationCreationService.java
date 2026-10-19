@@ -11,8 +11,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCreationCommand;
@@ -27,9 +31,20 @@ import com.rentflow.repository.ReservationRepository;
 import com.rentflow.service.InventoryGateway.ClaimResult;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
+
+import static com.rentflow.service.ReservationCreationOutcomes.ACTIVE_RESERVATION_EXISTS;
+import static com.rentflow.service.ReservationCreationOutcomes.IDEMPOTENCY_IN_PROGRESS;
+import static com.rentflow.service.ReservationCreationOutcomes.IDEMPOTENCY_KEY_REUSED;
+import static com.rentflow.service.ReservationCreationOutcomes.INVALID_INVENTORY_REFERENCE;
+import static com.rentflow.service.ReservationCreationOutcomes.INVENTORY_ITEM_NOT_FOUND;
+import static com.rentflow.service.ReservationCreationOutcomes.INVENTORY_ITEM_UNAVAILABLE;
+import static com.rentflow.service.ReservationCreationOutcomes.VALIDATION_FAILED;
 
 @Service
 public class ReservationCreationService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ReservationCreationService.class);
     private static final Set<ReservationStatus> ACTIVE_STATUSES =
             Set.of(ReservationStatus.HELD, ReservationStatus.CONFIRMED);
 
@@ -37,6 +52,7 @@ public class ReservationCreationService {
     private final ReservationRepository reservations;
     private final InventoryGateway inventory;
     private final MeterRegistry metrics;
+    private final ObservationRegistry observations;
     private final Duration holdDuration;
 
     public ReservationCreationService(
@@ -44,16 +60,41 @@ public class ReservationCreationService {
             ReservationRepository reservations,
             InventoryGateway inventory,
             MeterRegistry metrics,
+            ObservationRegistry observations,
             ReservationRuntimeSettings settings) {
         this.creationRequests = creationRequests;
         this.reservations = reservations;
         this.inventory = inventory;
         this.metrics = metrics;
+        this.observations = observations;
         this.holdDuration = settings.cancellation().expiration().holdDuration();
     }
 
     @Transactional
     public Result create(UUID key, ReservationCreationCommand command) {
+        metrics.summary("reservation.creation.batch.size")
+                .record(command.items().size());
+        Observation observation = Observation.start("reservation.creation", observations);
+        try (Observation.Scope ignored = observation.openScope()) {
+            Result result = execute(key, command);
+            observation.lowCardinalityKeyValue("outcome", executionOutcome(result));
+            observation.lowCardinalityKeyValue("replayed", Boolean.toString(result.replayed()));
+            return result;
+        } catch (RuntimeException | Error failure) {
+            observation.lowCardinalityKeyValue(
+                    "outcome",
+                    failure instanceof InventoryGateway.ServiceUnavailableException
+                            ? "unavailable"
+                            : failure instanceof InventoryGateway.ProtocolException ? "protocol_error" : "error");
+            observation.lowCardinalityKeyValue("replayed", "false");
+            observation.error(failure);
+            throw failure;
+        } finally {
+            observation.stop();
+        }
+    }
+
+    private Result execute(UUID key, ReservationCreationCommand command) {
         String fingerprint = IdempotencyFingerprint.of(command);
         if (!creationRequests.tryExecutionLock(IdempotencyFingerprint.lockId(key))) {
             count("busy");
@@ -131,7 +172,7 @@ public class ReservationCreationService {
                 failures.add(new Failure(
                         index,
                         serialNumber,
-                        "ACTIVE_RESERVATION_EXISTS",
+                        ACTIVE_RESERVATION_EXISTS,
                         "An active reservation already exists for this item."));
             }
         }
@@ -180,7 +221,42 @@ public class ReservationCreationService {
         completed.complete(fingerprint, outcome, creationRequests.databaseTime());
         creationRequests.saveAndFlush(completed);
         count("completion");
+        String committedOutcome = terminalOutcome(outcome.code());
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                try {
+                    metrics.counter("reservation.creation.committed", "outcome", committedOutcome)
+                            .increment();
+                } catch (RuntimeException failure) {
+                    LOGGER.warn("Committed creation telemetry could not be recorded.", failure);
+                }
+            }
+        });
         return result(outcome, completed.getExpiresAt(), false);
+    }
+
+    private String executionOutcome(Result result) {
+        if (IDEMPOTENCY_IN_PROGRESS.equals(result.code())) {
+            return "busy";
+        }
+        if (IDEMPOTENCY_KEY_REUSED.equals(result.code()) && result.expiresAt() == null) {
+            return "key_mismatch";
+        }
+        return terminalOutcome(result.code());
+    }
+
+    private String terminalOutcome(String code) {
+        return switch (code) {
+            case null -> "created";
+            case VALIDATION_FAILED -> "validation_failed";
+            case ACTIVE_RESERVATION_EXISTS -> "active_conflict";
+            case INVENTORY_ITEM_NOT_FOUND -> "inventory_missing";
+            case INVENTORY_ITEM_UNAVAILABLE -> "inventory_unavailable";
+            case INVALID_INVENTORY_REFERENCE -> "invalid_reference";
+            case IDEMPOTENCY_KEY_REUSED -> "key_reused";
+            default -> "error";
+        };
     }
 
     private Result transientResult(ReservationCreationOutcome outcome) {

@@ -37,7 +37,13 @@ class ReservationCancellationOutboxRelayServiceTest {
         outboxes = mock(ReservationCancellationOutboxRepository.class);
         kafka = mock(KafkaTemplate.class);
         service = new ReservationCancellationOutboxRelayService(
-                outboxes, kafka, ReservationPropertiesFixture.runtimeDefaults());
+                outboxes,
+                kafka,
+                ReservationPropertiesFixture.runtimeDefaults(),
+                io.micrometer.tracing.Tracer.NOOP,
+                io.opentelemetry.api.OpenTelemetry.noop(),
+                io.micrometer.observation.ObservationRegistry.NOOP,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     }
 
     @Test
@@ -118,6 +124,43 @@ class ReservationCancellationOutboxRelayServiceTest {
                 .isEqualTo(Duration.ofSeconds(2));
         assertThat(ReservationCancellationOutboxRelayService.retryDelay(initial, 2, maximum, 0.2, 1000, 1))
                 .isEqualTo(Duration.ofMinutes(6));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void lateAcknowledgementAfterTimeoutOrInterruptionDoesNotChangePersistedRetryState(boolean interrupted) {
+        ReservationCancellationOutbox outbox = outbox();
+        when(outboxes.tryRelayLock()).thenReturn(true);
+        when(outboxes.findFirstByPublishedAtIsNullOrderByOccurredAtAscEventIdAsc())
+                .thenReturn(Optional.of(outbox));
+        when(outboxes.databaseTime()).thenReturn(ATTEMPT_AT, ATTEMPT_AT.plusMillis(1));
+        CompletableFuture<org.springframework.kafka.support.SendResult<byte[], byte[]>> future =
+                new CompletableFuture<>() {
+                    @Override
+                    public org.springframework.kafka.support.SendResult<byte[], byte[]> get(
+                            long timeout, java.util.concurrent.TimeUnit unit)
+                            throws InterruptedException, TimeoutException {
+                        if (interrupted) {
+                            throw new InterruptedException("controlled interruption");
+                        }
+                        throw new TimeoutException("controlled acknowledgement deadline");
+                    }
+                };
+        when(kafka.send(any(), any(), any())).thenReturn(future);
+        ReservationCancellationOutboxRelayService.Result result = service.publishOldest();
+        assertThat(result.status())
+                .isEqualTo(
+                        interrupted
+                                ? ReservationCancellationOutboxRelayService.Status.INTERRUPTED
+                                : ReservationCancellationOutboxRelayService.Status.FAILED);
+        assertThat(result.failure()).isInstanceOf(interrupted ? InterruptedException.class : TimeoutException.class);
+        Instant retryAt = outbox.getNextAttemptAt();
+        assertThat(future.complete(null)).isTrue();
+        assertThat(outbox.getPublishedAt()).isNull();
+        assertThat(outbox.getNextAttemptAt()).isEqualTo(retryAt);
+        assertThat(outbox.getAttemptCount()).isOne();
+        assertThat(outbox.getPayload()).isEqualTo("{\"event\":true}");
+        assertThat(Thread.currentThread().isInterrupted()).isFalse();
     }
 
     private ReservationCancellationOutbox outbox() {

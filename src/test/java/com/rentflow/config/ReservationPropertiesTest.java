@@ -40,6 +40,7 @@ class ReservationPropertiesTest {
         assertThat(settings.cancellation().expiration())
                 .isEqualTo(new ReservationRuntimeSettings.Cancellation.Expiration(
                         Duration.ofMinutes(10), Duration.ofSeconds(5), 100));
+        assertThat(settings.observability().queryTimeout()).isEqualTo(Duration.ofSeconds(5));
     }
 
     @Test
@@ -72,7 +73,8 @@ class ReservationPropertiesTest {
         ReservationProperties withBlankCron = new ReservationProperties(
                 new ReservationProperties.Creation(
                         new ReservationProperties.Creation.Cleanup(" ", Duration.ofSeconds(60))),
-                properties.cancellation());
+                properties.cancellation(),
+                properties.observability());
         assertThat(validator.validate(withBlankCron)).hasSize(1);
     }
 
@@ -88,6 +90,30 @@ class ReservationPropertiesTest {
                         new ReservationProperties.Cancellation.Retry(initial, multiplier, maximum, jitter),
                         new ReservationProperties.Cancellation.Cleanup(true, "0 30 3 * * *", Duration.ofSeconds(60)),
                         new ReservationProperties.Cancellation.Expiration(
-                                true, Duration.ofMinutes(10), Duration.ofSeconds(5), Duration.ofSeconds(5), 100)));
+                                true, Duration.ofMinutes(10), Duration.ofSeconds(5), Duration.ofSeconds(5), 100)),
+                ReservationPropertiesFixture.defaults().observability());
+    }
+
+    @Test
+    void rejectsInvalidMonitoringDurations() {
+        for (Duration invalid : new Duration[] {
+            Duration.ZERO,
+            Duration.ofSeconds(-1),
+            Duration.ofNanos(1),
+            Duration.ofSeconds(Integer.MAX_VALUE).plusMillis(1)
+        }) {
+            assertThatThrownBy(() -> new ReservationProperties.Observability(
+                            invalid, Duration.ofMinutes(1), Duration.ofSeconds(5)))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("operationalBacklogFixedDelay");
+            assertThatThrownBy(() -> new ReservationProperties.Observability(
+                            Duration.ofSeconds(15), invalid, Duration.ofSeconds(5)))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("cleanupBacklogFixedDelay");
+            assertThatThrownBy(() -> new ReservationProperties.Observability(
+                            Duration.ofSeconds(15), Duration.ofMinutes(1), invalid))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("queryTimeout");
+        }
     }
 }

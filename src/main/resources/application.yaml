@@ -1,4 +1,6 @@
 spring:
+  main:
+    banner-mode: "off"
   application:
     name: rent-flow-reservation
   jackson:
@@ -34,6 +36,8 @@ spring:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     admin:
       fail-fast: false
+    template:
+      observation-enabled: true
     producer:
       acks: all
       key-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
@@ -49,10 +53,68 @@ springdoc:
   paths-to-match: /api/v1/**
 
 management:
+  server:
+    port: ${MANAGEMENT_SERVER_PORT:8087}
+    address: ${MANAGEMENT_SERVER_ADDRESS:127.0.0.1}
+  metrics:
+    tags:
+      service: ${spring.application.name}
+      environment: ${OBSERVABILITY_ENVIRONMENT:local}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        http.client.requests: true
+        reservation.creation: true
+        reservation.inventory.claim: true
+        reservation.worker.run: true
+      minimum-expected-value:
+        http.server.requests: 1ms
+        http.client.requests: 1ms
+        reservation.creation: 1ms
+        reservation.inventory.claim: 1ms
+        reservation.worker.run: 1ms
+      maximum-expected-value:
+        http.server.requests: 30s
+        http.client.requests: 30s
+        reservation.creation: 30s
+        reservation.inventory.claim: 30s
+        reservation.worker.run: 120s
+  tracing:
+    propagation:
+      type: w3c
+    baggage:
+      enabled: false
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+    export:
+      otlp:
+        enabled: ${TRACING_EXPORT_ENABLED:false}
+  logging:
+    export:
+      otlp:
+        enabled: false
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  opentelemetry:
+    resource-attributes:
+      service.name: ${spring.application.name}
+      deployment.environment.name: ${OBSERVABILITY_ENVIRONMENT:local}
+      service.instance.id: ${OBSERVABILITY_INSTANCE:${HOSTNAME:standalone}}
+    tracing:
+      export:
+        max-queue-size: 2048
+        max-batch-size: 512
+        otlp:
+          transport: http
+          endpoint: ${TRACING_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+          connect-timeout: 2s
+          timeout: 2s
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
   endpoint:
     health:
       probes:
@@ -64,6 +126,36 @@ management:
         readiness:
           include: readinessState,db
       show-details: never
+
+logging:
+  level:
+    org.apache.kafka.clients.producer.ProducerConfig: WARN
+    org.apache.kafka.clients.consumer.ConsumerConfig: WARN
+    org.apache.kafka.clients.admin.AdminClientConfig: WARN
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        environment: ${OBSERVABILITY_ENVIRONMENT:local}
+        node-name: ${OBSERVABILITY_INSTANCE:${HOSTNAME:standalone}}
+    json:
+      stacktrace:
+        max-length: 16384
+        max-throwable-depth: 64
+
+jdbc:
+  includes: connection,query
+  hikari:
+    enabled: false
+  resultset-operations:
+    enabled: false
+  datasource-proxy:
+    include-parameter-values: false
+    query:
+      enable-logging: false
+    slow-query:
+      enable-logging: false
 
 resilience4j:
   circuitbreaker:
@@ -94,6 +186,12 @@ resilience4j:
         retry-exception-predicate: com.rentflow.service.rest.InventoryRetryableExceptionPredicate
 
 reservation:
+  kafka:
+    cluster-id: ${RESERVATION_KAFKA_CLUSTER_ID:}
+  observability:
+    operational-backlog-fixed-delay: 15s
+    cleanup-backlog-fixed-delay: 60s
+    query-timeout: 5s
   creation:
     cleanup:
       cron: "0 0 3 * * *"

@@ -1,7 +1,6 @@
 package com.rentflow.service;
 
-import java.time.Duration;
-import java.time.Instant;
+import java.time.Clock;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
@@ -10,9 +9,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import com.rentflow.repository.ReservationCancellationOutboxRepository;
-
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 
 @Service
 @ConditionalOnProperty(name = "reservation.cancellation.relay.enabled", havingValue = "true", matchIfMissing = true)
@@ -21,27 +20,36 @@ public class ReservationCancellationOutboxRelayScheduledService {
             LoggerFactory.getLogger(ReservationCancellationOutboxRelayScheduledService.class);
 
     private final ReservationCancellationOutboxRelayService relay;
-    private final ReservationCancellationOutboxRepository outboxes;
     private final MeterRegistry metrics;
+    private final ObservationRegistry observations;
+    private final Clock clock;
     private final int maxEventsPerRun;
     private final long budgetNanos;
-    private final AtomicLong pending = new AtomicLong();
-    private final AtomicLong oldestAgeSeconds = new AtomicLong();
+    private final AtomicLong lastRun = new AtomicLong();
+    private final AtomicLong lastSuccess = new AtomicLong();
 
     public ReservationCancellationOutboxRelayScheduledService(
             ReservationCancellationOutboxRelayService relay,
-            ReservationCancellationOutboxRepository outboxes,
             MeterRegistry metrics,
-            ReservationRuntimeSettings settings) {
+            ReservationRuntimeSettings settings,
+            ObservationRegistry observations,
+            Clock clock) {
         ReservationRuntimeSettings.Cancellation.Relay relaySettings =
                 settings.cancellation().relay();
         this.relay = relay;
-        this.outboxes = outboxes;
         this.metrics = metrics;
+        this.observations = observations;
+        this.clock = clock;
         this.maxEventsPerRun = relaySettings.maxEventsPerRun();
         this.budgetNanos = relaySettings.runtimeBudget().toNanos();
-        metrics.gauge("reservation.cancellation.outbox.pending", pending);
-        metrics.gauge("reservation.cancellation.outbox.oldest.age", oldestAgeSeconds);
+        io.micrometer.core.instrument.Gauge.builder(
+                        "reservation.worker.last.run.timestamp", lastRun, AtomicLong::doubleValue)
+                .tag("worker", "relay")
+                .register(metrics);
+        io.micrometer.core.instrument.Gauge.builder(
+                        "reservation.worker.last.success.timestamp", lastSuccess, AtomicLong::doubleValue)
+                .tag("worker", "relay")
+                .register(metrics);
     }
 
     @Scheduled(fixedDelayString = "${reservation.cancellation.relay.fixed-delay}")
@@ -49,33 +57,21 @@ public class ReservationCancellationOutboxRelayScheduledService {
         long started = System.nanoTime();
         int published = 0;
         boolean restoreInterrupt = false;
-        try {
+        boolean failed = false;
+        Observation observation = startWorkerObservation();
+        try (Observation.Scope _ = observation.openScope()) {
             while (published < maxEventsPerRun && System.nanoTime() - started < budgetNanos) {
                 ReservationCancellationOutboxRelayService.Result result = relay.publishOldest();
                 if (result.status() == ReservationCancellationOutboxRelayService.Status.PUBLISHED) {
                     metrics.counter("reservation.cancellation.outbox.publish.attempts", "outcome", "published")
                             .increment();
                     published++;
-                    if (result.recovered()) {
-                        LOGGER.info(
-                                "Reservation cancellation publication recovered: eventId={}, attemptCount={}",
-                                result.eventId(),
-                                result.attemptCount());
-                    }
                     continue;
                 }
                 if (result.status() == ReservationCancellationOutboxRelayService.Status.FAILED
                         || result.status() == ReservationCancellationOutboxRelayService.Status.INTERRUPTED) {
-                    metrics.counter("reservation.cancellation.outbox.publish.attempts", "outcome", "failed")
-                            .increment();
-                    metrics.counter("reservation.cancellation.outbox.retries.scheduled")
-                            .increment();
-                    LOGGER.warn(
-                            "Reservation cancellation publication failed: eventId={}, attemptCount={}, failureCode={}, nextAttemptAt={}",
-                            result.eventId(),
-                            result.attemptCount(),
-                            result.failureCode(),
-                            result.nextAttemptAt());
+                    failed = true;
+                    recordPublicationFailure(result, observation);
                     if (result.status() == ReservationCancellationOutboxRelayService.Status.INTERRUPTED) {
                         restoreInterrupt = true;
                     }
@@ -83,28 +79,54 @@ public class ReservationCancellationOutboxRelayScheduledService {
                 break;
             }
         } catch (RuntimeException exception) {
+            failed = true;
+            observation.error(exception);
             metrics.counter("reservation.cancellation.outbox.publish.attempts", "outcome", "failed")
                     .increment();
-            LOGGER.warn("Reservation cancellation relay failed; the next scheduled run will retry.");
+            LOGGER.warn("Reservation cancellation relay failed; the next scheduled run will retry.", exception);
+        } catch (Error failure) {
+            failed = true;
+            observation.error(failure);
+            throw failure;
         } finally {
-            refreshBacklog();
+            finishWorkerObservation(observation, failed);
             if (restoreInterrupt) {
                 Thread.currentThread().interrupt();
             }
         }
     }
 
-    private void refreshBacklog() {
-        try {
-            pending.set(outboxes.countByPublishedAtIsNull());
-            Instant databaseTime = outboxes.databaseTime();
-            long age = outboxes.oldestPendingOccurredAt()
-                    .map(oldest ->
-                            Math.max(0L, Duration.between(oldest, databaseTime).toSeconds()))
-                    .orElse(0L);
-            oldestAgeSeconds.set(age);
-        } catch (RuntimeException exception) {
-            LOGGER.warn("Reservation cancellation backlog metrics could not be refreshed.");
+    private Observation startWorkerObservation() {
+        lastRun.set(clock.instant().getEpochSecond());
+        return Observation.createNotStarted("reservation.worker.run", observations)
+                .lowCardinalityKeyValue("worker", "relay")
+                .start();
+    }
+
+    private void recordPublicationFailure(
+            ReservationCancellationOutboxRelayService.Result result, Observation observation) {
+        metrics.counter("reservation.cancellation.outbox.publish.attempts", "outcome", "failed")
+                .increment();
+        metrics.counter("reservation.cancellation.outbox.retries.scheduled").increment();
+        Throwable failure = result.failure() != null
+                ? result.failure()
+                : new IllegalStateException("Cancellation publication failed: " + result.failureCode());
+        observation.error(failure);
+        LOGGER.atWarn()
+                .addKeyValue("eventId", result.eventId())
+                .addKeyValue("attemptCount", result.attemptCount())
+                .addKeyValue("failureCode", result.failureCode())
+                .addKeyValue("nextAttemptAt", result.nextAttemptAt())
+                .setCause(failure)
+                .log("Reservation cancellation publication failed.");
+    }
+
+    private void finishWorkerObservation(Observation observation, boolean failed) {
+        observation
+                .lowCardinalityKeyValue("outcome", failed ? "error" : "success")
+                .stop();
+        if (!failed) {
+            lastSuccess.set(clock.instant().getEpochSecond());
         }
     }
 }

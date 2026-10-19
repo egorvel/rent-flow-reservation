@@ -77,6 +77,14 @@ compose exec --no-TTY reservation sh -ec '
 wait_http /livez 200
 wait_http /readyz 200
 
+info "Checking private management exposure"
+management_address="$(compose port reservation 8087 2>/dev/null || true)"
+[[ -z "$management_address" ]] || fail "Management port must not be published"
+for management_path in /actuator/prometheus /actuator/health /actuator/env; do
+    management_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 3 "${BASE_URL}${management_path}")"
+    [[ "$management_status" == 404 ]] || fail "$management_path is exposed on the application port"
+done
+
 info "Creating a HELD reservation"
 response="$(curl --fail --silent --show-error --max-time 5 --request POST --header 'Content-Type: application/json' --header "Idempotency-Key: $IDEMPOTENCY_KEY" --data "$CREATE_REQUEST" "${BASE_URL}/api/v1/reservations")"
 jq --exit-status --arg date "$SMOKE_DATE" 'length == 1 and .[0].status == "HELD" and .[0].serialNumber == "SMOKE-001" and .[0].customerId == "CUSTOMER-SMOKE" and .[0].orderId == "ORDER-SMOKE" and .[0].startDate == $date and .[0].endDate == $date and (.[0].timestamp | endswith("Z"))' <<<"$response" >/dev/null

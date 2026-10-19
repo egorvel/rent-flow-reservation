@@ -10,6 +10,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
+import com.rentflow.model.ReservationBacklog;
 import com.rentflow.model.ReservationCancellationOutbox;
 
 public interface ReservationCancellationOutboxRepository extends JpaRepository<ReservationCancellationOutbox, UUID> {
@@ -53,4 +54,24 @@ public interface ReservationCancellationOutboxRepository extends JpaRepository<R
             WHERE published_at <= clock_timestamp() - INTERVAL '30 days'
             """, nativeQuery = true)
     long countCleanupBacklog();
+
+    @Query(value = """
+            WITH measured AS MATERIALIZED (SELECT clock_timestamp() AS at)
+            SELECT count(entry.event_id) AS backlog,
+                   COALESCE(EXTRACT(EPOCH FROM measured.at - min(entry.occurred_at)), 0) AS "oldestAge",
+                   EXTRACT(EPOCH FROM measured.at) AS "measuredAt"
+            FROM measured LEFT JOIN reservation.reservation_cancellation_outbox entry ON entry.published_at IS NULL
+            GROUP BY measured.at
+            """, nativeQuery = true)
+    ReservationBacklog monitoringSnapshot();
+
+    @Query(value = """
+            WITH measured AS MATERIALIZED (SELECT clock_timestamp() AS at)
+            SELECT count(entry.event_id) AS backlog,
+                   0 AS "oldestAge",
+                   EXTRACT(EPOCH FROM measured.at) AS "measuredAt"
+            FROM measured LEFT JOIN reservation.reservation_cancellation_outbox entry ON entry.published_at <= measured.at - INTERVAL '30 days'
+            GROUP BY measured.at
+            """, nativeQuery = true)
+    ReservationBacklog cleanupMonitoringSnapshot();
 }

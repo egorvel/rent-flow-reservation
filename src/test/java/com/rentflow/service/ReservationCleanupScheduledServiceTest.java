@@ -20,11 +20,17 @@ import static org.mockito.Mockito.when;
 class ReservationCleanupScheduledServiceTest {
     private ReservationCleanupService cleanup;
     private SimpleMeterRegistry metrics;
+    private io.micrometer.observation.ObservationRegistry observations;
 
     @BeforeEach
     void setUp() {
         cleanup = mock(ReservationCleanupService.class);
         metrics = new SimpleMeterRegistry();
+        observations = io.micrometer.observation.ObservationRegistry.create();
+        observations
+                .observationConfig()
+                .observationHandler(
+                        new io.micrometer.core.instrument.observation.DefaultMeterObservationHandler(metrics));
     }
 
     @Test
@@ -38,25 +44,20 @@ class ReservationCleanupScheduledServiceTest {
     }
 
     @Test
-    void creationCleanupContinuesAcrossAFullChunkAndRefreshesTheBacklog() {
+    void creationCleanupContinuesAcrossAFullChunkWithoutQueryingBacklog() {
         when(cleanup.deleteExpiredCreationChunk()).thenReturn(1000, 7);
-        when(cleanup.countExpiredCreationRequests()).thenReturn(3L);
 
         scheduler(true, () -> 0L).cleanCreationRequests();
 
         verify(cleanup, times(2)).deleteExpiredCreationChunk();
         assertThat(metrics.counter("reservation.creation.cleanup.deleted").count())
                 .isEqualTo(1007);
-        assertThat(metrics.get("reservation.creation.cleanup.expired.backlog")
-                        .gauge()
-                        .value())
-                .isEqualTo(3);
+        verify(cleanup, never()).countExpiredCreationRequests();
     }
 
     @Test
     void cancellationCleanupUsesTheSameBoundedLoopAndMetrics() {
         when(cleanup.deletePublishedCancellationChunk()).thenReturn(1000, 5);
-        when(cleanup.countCancellationCleanupBacklog()).thenReturn(2L);
 
         scheduler(true, () -> 0L).cleanCancellationOutbox();
 
@@ -64,10 +65,7 @@ class ReservationCleanupScheduledServiceTest {
         assertThat(metrics.counter("reservation.cancellation.outbox.cleanup.deleted")
                         .count())
                 .isEqualTo(1005);
-        assertThat(metrics.get("reservation.cancellation.outbox.cleanup.backlog")
-                        .gauge()
-                        .value())
-                .isEqualTo(2);
+        verify(cleanup, never()).countCancellationCleanupBacklog();
     }
 
     @Test
@@ -79,7 +77,7 @@ class ReservationCleanupScheduledServiceTest {
         scheduler(true, nanoTime).cleanCreationRequests();
 
         verify(cleanup).deleteExpiredCreationChunk();
-        verify(cleanup).countExpiredCreationRequests();
+        verify(cleanup, never()).countExpiredCreationRequests();
     }
 
     @Test
@@ -113,6 +111,13 @@ class ReservationCleanupScheduledServiceTest {
 
     private ReservationCleanupScheduledService scheduler(boolean cancellationEnabled, LongSupplier nanoTime) {
         return new ReservationCleanupScheduledService(
-                cleanup, metrics, Duration.ofSeconds(60), Duration.ofSeconds(60), cancellationEnabled, nanoTime);
+                cleanup,
+                metrics,
+                Duration.ofSeconds(60),
+                Duration.ofSeconds(60),
+                cancellationEnabled,
+                nanoTime,
+                observations,
+                java.time.Clock.systemUTC());
     }
 }

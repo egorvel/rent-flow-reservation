@@ -34,6 +34,8 @@ public class ReservationServiceConfig {
                         new ReservationRuntimeSettings.Cancellation.Expiration(
                                 expiration.holdDuration(),
                                 expiration.runtimeBudget(),
-                                expiration.maxReservationsPerRun())));
+                                expiration.maxReservationsPerRun())),
+                new ReservationRuntimeSettings.Observability(
+                        properties.observability().queryTimeout()));
     }
 }

@@ -288,7 +288,9 @@ class OpenApiIT extends PostgresIntegrationTest {
                 request.customerId(),
                 request.orderId(),
                 List.of(new CreateReservationItemRequest(
-                        request.serialNumber(), request.startDate(), request.endDate())));
+                        request.serialNumber(),
+                        LocalDate.now(java.time.ZoneOffset.UTC).plusDays(1),
+                        LocalDate.now(java.time.ZoneOffset.UTC).plusDays(3))));
         JsonNode created = mapper.readTree(mvc.perform(post(COLLECTION)
                         .header("Idempotency-Key", UUID.randomUUID())
                         .contentType(MediaType.APPLICATION_JSON)

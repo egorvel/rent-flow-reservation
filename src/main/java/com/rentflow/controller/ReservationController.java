@@ -47,6 +47,8 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 
+import static com.rentflow.service.ReservationCreationOutcomes.IDEMPOTENCY_IN_PROGRESS;
+
 @RestController
 @Tag(name = "Reservations")
 @RequestMapping(path = ReservationController.PATH, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -82,7 +84,6 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 })
 public class ReservationController {
     public static final String PATH = "/api/v1/reservations";
-    private static final String IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS";
     private static final Set<String> COLLECTION_PARAMETERS = Set.of("page", "size", "sort", "direction");
     private final ReservationService service;
     private final ReservationCreationService creationService;

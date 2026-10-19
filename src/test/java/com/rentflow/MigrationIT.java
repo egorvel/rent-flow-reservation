@@ -98,9 +98,9 @@ class MigrationIT extends PostgresIntegrationTest {
         assertThat(saved.getTimestamp().getNano() % 1000).isZero();
         assertThat(flyway.migrate().migrationsExecuted).isZero();
         assertThat(jdbc.queryForObject(
-                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2', '3', '4') AND success",
+                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2', '3', '4', '5') AND success",
                         Integer.class))
-                .isEqualTo(4);
+                .isEqualTo(5);
         try (ConfigurableApplicationContext context = start(Map.of())) {
             Reservation restored = context.getBean(ReservationRepository.class)
                     .findById(saved.getId())
@@ -150,7 +150,9 @@ class MigrationIT extends PostgresIntegrationTest {
                         "attempt_count",
                         "next_attempt_at",
                         "last_failure_at",
-                        "last_failure_code");
+                        "last_failure_code",
+                        "traceparent",
+                        "tracestate");
         assertThat(jdbc.queryForList("""
                         SELECT indexname
                         FROM pg_indexes

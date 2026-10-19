@@ -38,6 +38,17 @@ services:
       SPRING_DATASOURCE_USERNAME: ${RESERVATION_DB_USER:-reservation}
       SPRING_DATASOURCE_PASSWORD: ${RESERVATION_DB_PASSWORD:-reservation-local}
       INVENTORY_BASE_URL: http://inventory:8080
+      MANAGEMENT_SERVER_ADDRESS: 0.0.0.0
+      MANAGEMENT_SERVER_PORT: ${MANAGEMENT_SERVER_PORT:-8087}
+      TRACING_EXPORT_ENABLED: ${TRACING_EXPORT_ENABLED:-false}
+      TRACING_OTLP_ENDPOINT: ${TRACING_OTLP_ENDPOINT:-http://localhost:4318/v1/traces}
+      OBSERVABILITY_ENVIRONMENT: ${OBSERVABILITY_ENVIRONMENT:-local}
+      TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
+      RESERVATION_KAFKA_CLUSTER_ID: ${RESERVATION_KAFKA_CLUSTER_ID:-}
+    labels:
+      rentflow.observability.collect: "true"
+      rentflow.service: rent-flow-reservation
+      rentflow.environment: ${OBSERVABILITY_ENVIRONMENT:-local}
     depends_on:
       inventory:
         condition: service_healthy

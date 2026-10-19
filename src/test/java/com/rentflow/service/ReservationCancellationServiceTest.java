@@ -42,7 +42,12 @@ class ReservationCancellationServiceTest {
         outboxes = mock(ReservationCancellationOutboxRepository.class);
         mapper = new ObjectMapper();
         service = new ReservationCancellationService(
-                reservations, outboxes, mapper, ReservationPropertiesFixture.runtimeDefaults());
+                reservations,
+                outboxes,
+                mapper,
+                ReservationPropertiesFixture.runtimeDefaults(),
+                io.micrometer.tracing.Tracer.NOOP,
+                io.micrometer.tracing.propagation.Propagator.NOOP);
         when(outboxes.databaseTime()).thenReturn(DATABASE_TIME);
     }
 
@@ -76,6 +81,42 @@ class ReservationCancellationServiceTest {
         assertThat(payload.has("reservationId")).isFalse();
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void tracingCaptureFailureOrOversizeMetadataDoesNotPreventCancellation(boolean oversized) {
+        io.micrometer.tracing.Tracer tracer = mock(io.micrometer.tracing.Tracer.class);
+        io.micrometer.tracing.Span span = mock(io.micrometer.tracing.Span.class);
+        io.micrometer.tracing.propagation.Propagator propagator =
+                mock(io.micrometer.tracing.propagation.Propagator.class);
+        when(tracer.currentSpan()).thenReturn(span);
+        when(span.context()).thenReturn(mock(io.micrometer.tracing.TraceContext.class));
+        org.mockito.Mockito.doAnswer(invocation -> {
+                    if (!oversized) {
+                        throw new IllegalStateException("propagator unavailable");
+                    }
+                    java.util.Map<String, String> carrier = invocation.getArgument(1);
+                    carrier.put("traceparent", "x".repeat(56));
+                    return null;
+                })
+                .when(propagator)
+                .inject(
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
+        ReservationCancellationService observed = new ReservationCancellationService(
+                reservations, outboxes, mapper, ReservationPropertiesFixture.runtimeDefaults(), tracer, propagator);
+        UUID id = UUID.randomUUID();
+        Reservation reservation = reservation(ReservationStatus.HELD);
+        when(reservations.findForUpdateById(id)).thenReturn(Optional.of(reservation));
+        observed.cancel(id);
+        ArgumentCaptor<ReservationCancellationOutbox> captured =
+                ArgumentCaptor.forClass(ReservationCancellationOutbox.class);
+        verify(outboxes).save(captured.capture());
+        assertThat(reservation.getStatus()).isEqualTo(ReservationStatus.CANCELLED);
+        assertThat(captured.getValue().getTraceparent()).isNull();
+        assertThat(captured.getValue().getTracestate()).isNull();
+    }
+
     @Test
     void alreadyCancelledIsANoOpWithoutSamplingTime() {
         UUID reservationId = UUID.randomUUID();
@@ -105,7 +146,12 @@ class ReservationCancellationServiceTest {
         Reservation reservation = reservation(ReservationStatus.HELD);
         when(reservations.findForUpdateById(reservationId)).thenReturn(Optional.of(reservation));
         service = new ReservationCancellationService(
-                reservations, outboxes, mapper, ReservationPropertiesFixture.runtimeWithMaxPayloadBytes(32));
+                reservations,
+                outboxes,
+                mapper,
+                ReservationPropertiesFixture.runtimeWithMaxPayloadBytes(32),
+                io.micrometer.tracing.Tracer.NOOP,
+                io.micrometer.tracing.propagation.Propagator.NOOP);
 
         assertThatThrownBy(() -> service.cancel(reservationId))
                 .isInstanceOf(IllegalStateException.class)

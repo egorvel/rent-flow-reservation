@@ -37,6 +37,7 @@ import tools.jackson.databind.exc.InvalidFormatException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
+    private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(ApiExceptionHandler.class);
 
     private static final Comparator<ViolationResponse> VIOLATION_ORDER =
             Comparator.comparing(ViolationResponse::field).thenComparing(ViolationResponse::message);
@@ -53,11 +54,13 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(ServiceUnavailableException.class)
     ResponseEntity<ProblemResponse> handleInventoryUnavailable(
             ServiceUnavailableException exception, WebRequest request) {
+        markError(exception, request);
         return response(ApiProblem.INVENTORY_SERVICE_UNAVAILABLE, request, List.of());
     }
 
     @ExceptionHandler(ProtocolException.class)
     ResponseEntity<ProblemResponse> handleInventoryProtocol(ProtocolException exception, WebRequest request) {
+        markError(exception, request);
         return response(ApiProblem.INVENTORY_SERVICE_ERROR, request, List.of());
     }
 
@@ -173,22 +176,33 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             ProblemResponse problem = problem(status, ApiProblem.HTTP_ERROR, request, List.of());
             return objectResponse(problem, status, headers);
         }
+        markError(exception, request);
+        LOGGER.error("Unexpected framework failure handling request.", exception);
         return objectResponse(internalError(request), HttpStatus.INTERNAL_SERVER_ERROR, headers);
     }
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<ProblemResponse> handleUnexpected(Exception exception, WebRequest request) {
         HttpServletRequest servletRequest = ((ServletWebRequest) request).getRequest();
-        logger.error("Unexpected failure handling "
-                + servletRequest.getMethod()
-                + " "
-                + servletRequest.getRequestURI()
-                + " ("
-                + exception.getClass().getName()
-                + ")");
+        markError(exception, request);
+        LOGGER.atError()
+                .addKeyValue("method", servletRequest.getMethod())
+                .addKeyValue("path", servletRequest.getRequestURI())
+                .addKeyValue(
+                        "route",
+                        servletRequest.getAttribute(
+                                org.springframework.web.servlet.HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE))
+                .setCause(exception)
+                .log("Unexpected failure handling request");
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .contentType(MediaType.APPLICATION_PROBLEM_JSON)
                 .body(internalError(request));
+    }
+
+    private void markError(Exception exception, WebRequest request) {
+        HttpServletRequest servletRequest = ((ServletWebRequest) request).getRequest();
+        org.springframework.web.filter.ServerHttpObservationFilter.findObservationContext(servletRequest)
+                .ifPresent(context -> context.setError(exception));
     }
 
     private ResponseEntity<ProblemResponse> validationResponse(List<ViolationResponse> violations, WebRequest request) {

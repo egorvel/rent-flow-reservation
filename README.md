@@ -219,8 +219,9 @@ Operational metrics are `reservation.cancellation.outbox.publish.attempts`,
 `reservation.cancellation.expiration.transitions`,
 `reservation.cancellation.expiration.failures`,
 `reservation.cancellation.expiration.overdue`, and
-`reservation.cancellation.expiration.oldest.age`. Labels and logs exclude serial numbers,
-payloads, exception messages, and customer/order data.
+`reservation.cancellation.expiration.oldest.age`. Metric labels exclude business identifiers.
+Structured diagnostics retain useful exception details and validated equipment/event identifiers;
+payload dumps and deliberately captured customer/order data are excluded. See Observability below.
 
 ## Try every operation
 
@@ -288,7 +289,8 @@ background task deletes expired ledger rows.
 
 V1 creates `reservation.reservations`. The replacement V2 creates the six-column terminal
 idempotency ledger, adds the database timestamp default, and adds the active lookup index. V3 adds
-the cancellation outbox and its partial FIFO/cleanup indexes. Flyway history lives in
+the cancellation outbox and its partial FIFO/cleanup indexes. V4 adds hold deadlines; V5 adds
+optional immutable W3C origin context to the outbox. Flyway history lives in
 `reservation.flyway_schema_history`.
 Hibernate validates mappings and never generates DDL. Flyway cannot create schemas and is the
 sole mechanism for evolving Reservation-owned application objects after platform provisioning.
@@ -298,9 +300,123 @@ create the shared database/role/schema in a migration, or modify another service
 
 `/livez` reports application liveness independently of the database. `/readyz` includes database
 health, but deliberately excludes Kafka, and returns 503 during a database outage before
-recovering when PostgreSQL returns. `/actuator/health` is also available; other Actuator endpoints
-and detailed health components are not exposed.
+recovering when PostgreSQL returns. Health and Prometheus are available only on the separate
+management listener; detailed health components and other Actuator endpoints are not exposed.
 The runtime image's healthcheck uses `/readyz` on `${SERVER_PORT:-8080}`.
+
+## Observability
+
+Prometheus metrics, ECS JSON stdout logs and Micrometer/OpenTelemetry traces share the identity
+`service=rent-flow-reservation` and `environment=local` by default. The service runs without an
+observability backend. Trace export is disabled until deployment opts in; JVM, pool, HTTP,
+Resilience4j and business meters remain available independently of trace sampling/export.
+
+| Environment variable | Default and purpose |
+| --- | --- |
+| `MANAGEMENT_SERVER_PORT` | `8087`; health/Prometheus listener |
+| `MANAGEMENT_SERVER_ADDRESS` | `127.0.0.1`; Compose overrides to `0.0.0.0` without publishing it |
+| `OBSERVABILITY_ENVIRONMENT` | `local`; metric tag, ECS environment and OTel resource |
+| `OBSERVABILITY_INSTANCE` | `HOSTNAME`, falling back to `standalone`; ECS node and OTel instance |
+| `TRACING_EXPORT_ENABLED` | `false`; enable OTLP trace export explicitly |
+| `TRACING_OTLP_ENDPOINT` | `http://localhost:4318/v1/traces`; full HTTP/protobuf endpoint |
+| `TRACING_SAMPLING_PROBABILITY` | `1.0`; local full sampling, configurable for deployment |
+| `RESERVATION_KAFKA_CLUSTER_ID` | Empty; optional actual broker cluster ID to bypass discovery |
+
+Host execution exposes `http://127.0.0.1:8087/actuator/prometheus` and private health. Application
+port 8080 (published as 8082 locally) serves `/livez` and `/readyz` but returns 404 for every
+`/actuator/*` endpoint. Collector, Kafka and Inventory health do not affect readiness. Production
+network protection, telemetry access, authentication/TLS and retention belong to deployment.
+
+OTLP export is asynchronous, with a 2048-span queue, batches up to 512 and two-second connect/call
+timeouts. Queue overflow or collector failure can lose traces without changing business results.
+Logs go to stdout for Alloy; there is no separate OTLP log or metric export. HTTP/JDBC spans retain
+SQL statement shape and actual paths, with route templates used for metric labels. Automatic
+bodies, headers, query strings, baggage and bound SQL parameters are not captured. Application
+diagnostics exclude credentials and customer/order fields; validated equipment, reservation and
+event identifiers are permitted as searchable fields. Ordinary exception messages, causes and
+stacks remain useful internal diagnostics; these controls do not redact arbitrary SQL literals
+or values already contained in driver exceptions. ECS stack limits default to 16384 characters
+and throwable depth 64 through Spring's configurable settings.
+
+### Metric meanings
+
+| Meter | Interpretation |
+| --- | --- |
+| `reservation.creation.idempotency{outcome}` | Existing `attempt/completion/replay/busy/mismatch` code-path counters; completion does not prove commit |
+| `reservation.creation.committed{outcome}` | Newly stored terminal ledger outcomes after commit; excludes replay, transient busy, local mismatch and rollback |
+| `reservation.creation` | Method execution timer/histogram with bounded outcome and replayed tags; method return precedes transaction commit |
+| `reservation.creation.batch.size` | Submitted item count once per service invocation, including replay/failure; no per-item label |
+| `reservation.inventory.claim` | One complete logical claim including circuit evaluation, all physical attempts and retry waits |
+| `http.client.requests` | Physical HTTP attempts; compare with the logical claim rather than summing their counts |
+| `resilience4j.*` | Existing retry/breaker meters with unchanged policies and meanings |
+| `reservation.cancellation.outbox.publish.attempts{outcome}` | Existing scheduler results: published after committed proxy return; failed includes send and relay/database errors |
+| `reservation.cancellation.outbox.retries.scheduled` | Existing retry scheduling counter |
+| `reservation.cancellation.outbox.publish.duration{outcome}` | Physical send/ack wait: acknowledged, failed, timeout or interrupted; acknowledged alone does not prove DB commit |
+| `reservation.cancellation.outbox.publication.delay` | Occurrence-to-database publication timestamp, sampled after successful publication commit; does not prove Inventory release |
+| `reservation.cancellation.outbox.pending` / `.oldest.age` | Unpublished row count and oldest occurrence age at measurement |
+| `reservation.cancellation.expiration.overdue` / `.oldest.age` | HELD rows past their deadline and oldest delay beyond that deadline |
+| `reservation.cancellation.expiration.transitions` / `.failures` | Existing committed expiration transitions and failed worker calls |
+| `reservation.creation.cleanup.*` / `reservation.cancellation.outbox.cleanup.*` | Existing deleted/failures/duration signals and eligible-row backlog under existing retention |
+| `reservation.observability.backlog.last.success.timestamp{backlog}` | PostgreSQL measurement epoch-seconds for outbox, expiration, creation_cleanup or outbox_cleanup; zero before first success |
+| `reservation.observability.backlog.refresh.failures{backlog}` | Measurement failures, separate from worker failures |
+| `reservation.worker.run{worker,outcome}` | Actual worker invocation timer, including caught failures; empty/backoff/lock-busy normal runs are successful |
+| `reservation.worker.last.run.timestamp` / `.last.success.timestamp` | Application-clock epoch-seconds; zero before first invocation/success |
+
+Committed creation outcomes are `created`, `validation_failed`, `active_conflict`,
+`inventory_missing`, `inventory_unavailable`, `invalid_reference` and `key_reused`. They are
+process-local telemetry: a process crash between commit and its callback can lose a sample.
+Neither these counters nor result logs are a durable exactly-once audit ledger.
+
+Operational backlog refresh defaults to 15 seconds; both cleanup backlogs refresh every
+60 seconds. Set `reservation.observability.operational-backlog-fixed-delay`,
+`cleanup-backlog-fixed-delay` and `query-timeout` (default five seconds) to positive durations.
+Monitoring runs independently of business workers, including disabled workers, and never queries
+on a scrape. Initial values are NaN, successful empty measurements are zero, and refresh failure
+retains the entire last successful snapshot. An old age measurement must be shown as stale rather
+than healthy. Four worker threads and four dedicated monitoring threads prevent a blocked relay
+from monopolizing scheduling capacity. Counts/ages describe the shared database: dashboards must
+use the maximum of fresh replicas, not sum these gauges. Process-local counter rates can be summed.
+
+### Investigations and Common handoff
+
+For a slow creation, open the HTTP trace, inspect JDBC connection/query spans and the logical
+Inventory claim, then compare its duration with physical HTTP attempts and retry-wait events.
+Committed outcome counters tell whether terminal work committed; execution counters/timers alone
+cannot establish that. Retry WARNs and circuit state changes explain dependency degradation.
+
+For a stalled cancellation, first check backlog freshness and oldest pending
+age, eventId and publication failure diagnostics. The committed cancellation INFO includes the
+origin trace. Each later send attempt starts its own trace linked to that durable origin and its
+relay worker, including after a restart. KafkaTemplate supplies the outgoing trace headers;
+Inventory continues that publication trace. Navigate links or search `originTraceId` to return
+to the cancellation request. Legacy outbox rows with no valid context still publish normally.
+HTTP 204 means local cancellation committed; publication acknowledgement and later Inventory
+release are separate stages. Confirm release through Inventory's
+`inventory.reservation.cancellation.completion.delay`, processing outcomes, lag and DLT signals.
+No diagnostic call to Inventory is added by Reservation.
+
+Common's separate integration change must scrape `reservation:8087/actuator/prometheus`
+(`job=reservation`, 15s interval, 5s timeout), enable trace export to
+`http://rentflow-alloy:4318/v1/traces`, and collect ECS container logs through
+`rentflow.observability.collect=true` with bounded service/environment stream labels. Prometheus
+supplies instance/job; trace/event/origin IDs and runtime instance remain searchable log fields.
+Grafana needs origin-link navigation, HTTP/JVM/pool and creation/claim panels, publication/hold
+backlogs, worker progress and cleanup/freshness views. The optional Kafka cluster ID must be the
+actual target broker ID. With pinned Spring Kafka 4.1.0, failed normal cluster-ID discovery can
+block the relay for the admin timeout (default 30s) on repeated attempts; it does not run in the
+cancellation transaction. Later-version discovery retry throttling must not be assumed.
+
+Initial proposed warnings for Common are:
+
+- Fresh oldest pending publication age above 120s for 1m; oldest overdue hold age above 30s for 30s.
+- Operational measurements absent after 45s uptime or older than 45s; cleanup measurements absent
+  after 180s uptime or older than 180s. No fresh replica means unknown service backlog.
+- Sustained publication/worker errors over 5m.
+
+Age warnings remain active when workers are disabled. Interpret worker run/success timestamps
+alongside deployment configuration and scheduling cadence during diagnosis.
+Monitoring freshness is independent of worker flags. These provisional operational
+thresholds are not SLOs; notification routing and tuning follow measured baselines in Common.
 
 ## Verification
 

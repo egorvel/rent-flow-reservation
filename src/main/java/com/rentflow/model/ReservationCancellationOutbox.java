@@ -42,14 +42,35 @@ public class ReservationCancellationOutbox {
     @Column(name = "last_failure_code", length = 32)
     private FailureCode lastFailureCode;
 
+    @Column(updatable = false, length = 55)
+    private String traceparent;
+
+    @Column(updatable = false, length = 512)
+    private String tracestate;
+
     protected ReservationCancellationOutbox() {}
 
     public ReservationCancellationOutbox(UUID eventId, String recordKey, String payload, Instant occurredAt) {
+        this(eventId, recordKey, payload, occurredAt, null, null);
+    }
+
+    public ReservationCancellationOutbox(
+            UUID eventId, String recordKey, String payload, Instant occurredAt, String traceparent, String tracestate) {
         this.eventId = Objects.requireNonNull(eventId);
         this.recordKey = Objects.requireNonNull(recordKey);
         this.payload = Objects.requireNonNull(payload);
         this.occurredAt = Objects.requireNonNull(occurredAt);
         this.nextAttemptAt = occurredAt;
+        this.traceparent = traceparent;
+        this.tracestate = tracestate;
+    }
+
+    public String getTraceparent() {
+        return traceparent;
+    }
+
+    public String getTracestate() {
+        return tracestate;
     }
 
     public void recordPublished(Instant publicationTime) {

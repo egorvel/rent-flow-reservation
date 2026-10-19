@@ -13,6 +13,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 
 import com.rentflow.model.Reservation;
+import com.rentflow.model.ReservationBacklog;
 import com.rentflow.model.ReservationStatus;
 
 public interface ReservationRepository extends JpaRepository<Reservation, UUID> {
@@ -41,4 +42,14 @@ public interface ReservationRepository extends JpaRepository<Reservation, UUID> 
 
     List<Reservation> findAllBySerialNumberInAndStatusInAndEndDateGreaterThanEqual(
             Collection<String> serialNumbers, Collection<ReservationStatus> statuses, LocalDate acceptedDate);
+
+    @Query(value = """
+            WITH measured AS MATERIALIZED (SELECT clock_timestamp() AS at)
+            SELECT count(entry.id) AS backlog,
+                   COALESCE(EXTRACT(EPOCH FROM measured.at - min(entry.hold_expires_at)), 0) AS "oldestAge",
+                   EXTRACT(EPOCH FROM measured.at) AS "measuredAt"
+            FROM measured LEFT JOIN reservation.reservations entry ON entry.status = 'HELD' AND entry.hold_expires_at <= measured.at
+            GROUP BY measured.at
+            """, nativeQuery = true)
+    ReservationBacklog monitoringSnapshot();
 }

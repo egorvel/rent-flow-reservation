@@ -25,5 +25,6 @@ public abstract class PostgresIntegrationTest {
         registry.add("spring.datasource.password", () -> RESERVATION_PASSWORD);
         registry.add("reservation.cancellation.relay.enabled", () -> "false");
         registry.add("reservation.cancellation.cleanup.enabled", () -> "false");
+        registry.add("management.server.port", () -> "0");
     }
 }

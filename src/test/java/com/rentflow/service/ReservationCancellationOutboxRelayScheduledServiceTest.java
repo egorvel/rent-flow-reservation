@@ -26,12 +26,18 @@ class ReservationCancellationOutboxRelayScheduledServiceTest {
     private ReservationCancellationOutboxRelayService relay;
     private ReservationCancellationOutboxRepository outboxes;
     private SimpleMeterRegistry metrics;
+    private io.micrometer.observation.ObservationRegistry observations;
 
     @BeforeEach
     void setUp() {
         relay = mock(ReservationCancellationOutboxRelayService.class);
         outboxes = mock(ReservationCancellationOutboxRepository.class);
         metrics = new SimpleMeterRegistry();
+        observations = io.micrometer.observation.ObservationRegistry.create();
+        observations
+                .observationConfig()
+                .observationHandler(
+                        new io.micrometer.core.instrument.observation.DefaultMeterObservationHandler(metrics));
         when(outboxes.countByPublishedAtIsNull()).thenReturn(0L);
         when(outboxes.databaseTime()).thenReturn(Instant.parse("2026-09-21T15:30:00Z"));
         when(outboxes.oldestPendingOccurredAt()).thenReturn(Optional.empty());
@@ -112,8 +118,29 @@ class ReservationCancellationOutboxRelayScheduledServiceTest {
     private ReservationCancellationOutboxRelayScheduledService scheduler(int maxEvents) {
         return new ReservationCancellationOutboxRelayScheduledService(
                 relay,
-                outboxes,
                 metrics,
-                ReservationPropertiesFixture.runtimeWithRelayLimits(maxEvents, Duration.ofSeconds(5)));
+                ReservationPropertiesFixture.runtimeWithRelayLimits(maxEvents, Duration.ofSeconds(5)),
+                observations,
+                java.time.Clock.systemUTC());
+    }
+
+    @Test
+    void fatalWorkerFailureIsObservedAndRethrownWithoutClaimingSuccess() {
+        AssertionError failure = new AssertionError("fatal worker failure");
+        when(relay.publishOldest()).thenThrow(failure);
+        ReservationCancellationOutboxRelayScheduledService worker = scheduler(100);
+        org.assertj.core.api.Assertions.assertThatThrownBy(worker::publish).isSameAs(failure);
+        assertThat(metrics.get("reservation.worker.run")
+                        .tag("worker", "relay")
+                        .tag("outcome", "error")
+                        .timer()
+                        .count())
+                .isOne();
+        assertThat(metrics.get("reservation.worker.last.success.timestamp")
+                        .tag("worker", "relay")
+                        .gauge()
+                        .value())
+                .isZero();
+        assertThat(observations.getCurrentObservation()).isNull();
     }
 }

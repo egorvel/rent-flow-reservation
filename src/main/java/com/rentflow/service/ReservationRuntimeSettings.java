@@ -3,7 +3,9 @@ package com.rentflow.service;
 import java.time.Duration;
 
 /** Immutable runtime settings exposed to the service layer by the configuration boundary. */
-public record ReservationRuntimeSettings(Creation creation, Cancellation cancellation) {
+public record ReservationRuntimeSettings(Creation creation, Cancellation cancellation, Observability observability) {
+
+    public record Observability(Duration queryTimeout) {}
 
     public record Creation(Cleanup cleanup) {
         public record Cleanup(Duration runtimeBudget) {}

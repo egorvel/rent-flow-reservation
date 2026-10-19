@@ -77,9 +77,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class ReservationIT extends PostgresIntegrationTest {
     private static final String PATH = "/api/v1/reservations";
+    private static final LocalDate START_DATE =
+            LocalDate.now(java.time.ZoneOffset.UTC).plusDays(1);
+    private static final String START = START_DATE.toString();
+    private static final String END = START_DATE.plusDays(2).toString();
     private static final String CREATE = """
-        {"serialNumber":"DRILL-001","customerId":"CUSTOMER-001","orderId":"ORDER-001","startDate":"2026-10-01","endDate":"2026-10-03"}
-        """;
+        {"serialNumber":"DRILL-001","customerId":"CUSTOMER-001","orderId":"ORDER-001","startDate":"%s","endDate":"%s"}
+        """.formatted(START, END);
 
     @Autowired
     private MockMvc mvc;
@@ -154,10 +158,10 @@ class ReservationIT extends PostgresIntegrationTest {
         void oneSuccessfulBatchUsesOneDatabaseCreationTimeAndConfiguredDeadline() throws Exception {
             String request = """
                 {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
-                  {"serialNumber":"BATCH-001","startDate":"2026-10-01","endDate":"2026-10-03"},
-                  {"serialNumber":"BATCH-002","startDate":"2026-10-01","endDate":"2026-10-03"}
+                  {"serialNumber":"BATCH-001","startDate":"%s","endDate":"%s"},
+                  {"serialNumber":"BATCH-002","startDate":"%s","endDate":"%s"}
                 ]}
-                """;
+                """.formatted(START, END, START, END);
 
             JsonNode created = mapper.readTree(mvc.perform(post(PATH)
                             .header("Idempotency-Key", UUID.randomUUID())
@@ -185,8 +189,8 @@ class ReservationIT extends PostgresIntegrationTest {
         @ParameterizedTest
         @ValueSource(strings = {"HELD", "CONFIRMED"})
         void cancelsEligibleReservationAndCommitsOneOutboxEvent(String initialStatus) throws Exception {
-            Reservation reservation = new Reservation(
-                    "CANCEL-001", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3));
+            Reservation reservation =
+                    new Reservation("CANCEL-001", "CUSTOMER-001", "ORDER-001", START_DATE, START_DATE.plusDays(2));
             reservation.changeStatus(ReservationStatus.valueOf(initialStatus));
             Reservation saved = repository.saveAndFlush(reservation);
 
@@ -206,8 +210,8 @@ class ReservationIT extends PostgresIntegrationTest {
 
         @Test
         void repeatedCancellationIsAnEmptyNoOpWithoutAnotherEvent() throws Exception {
-            Reservation reservation = repository.saveAndFlush(new Reservation(
-                    "CANCEL-NOOP", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3)));
+            Reservation reservation = repository.saveAndFlush(
+                    new Reservation("CANCEL-NOOP", "CUSTOMER-001", "ORDER-001", START_DATE, START_DATE.plusDays(2)));
 
             for (int request = 0; request < 2; request++) {
                 mvc.perform(post(PATH + "/" + reservation.getId() + "/cancel"))
@@ -235,8 +239,8 @@ class ReservationIT extends PostgresIntegrationTest {
 
         @Test
         void concurrentCancellationCreatesOneLogicalEvent() throws Exception {
-            Reservation reservation = repository.saveAndFlush(new Reservation(
-                    "CANCEL-RACE", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3)));
+            Reservation reservation = repository.saveAndFlush(
+                    new Reservation("CANCEL-RACE", "CUSTOMER-001", "ORDER-001", START_DATE, START_DATE.plusDays(2)));
             int requests = 8;
             CountDownLatch ready = new CountDownLatch(requests);
             CountDownLatch start = new CountDownLatch(1);
@@ -413,10 +417,10 @@ class ReservationIT extends PostgresIntegrationTest {
                                     "Inventory item is not available."))));
             String body = """
                 {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
-                  {"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"},
-                  {"serialNumber":"MIXER-001","startDate":"2026-10-01","endDate":"2026-10-03"}
+                  {"serialNumber":"DRILL-001","startDate":"%s","endDate":"%s"},
+                  {"serialNumber":"MIXER-001","startDate":"%s","endDate":"%s"}
                 ]}
-                """;
+                """.formatted(START, END, START, END);
 
             mvc.perform(post(PATH)
                             .header("Idempotency-Key", UUID.randomUUID())
@@ -696,10 +700,10 @@ class ReservationIT extends PostgresIntegrationTest {
         void rejectsMissingKeyAndReplaysStoredDuplicateSerialValidation() throws Exception {
             String duplicate = """
                 {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
-                  {"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"},
-                  {"serialNumber":"DRILL-001","startDate":"2026-10-04","endDate":"2026-10-05"}
+                  {"serialNumber":"DRILL-001","startDate":"%s","endDate":"%s"},
+                  {"serialNumber":"DRILL-001","startDate":"%s","endDate":"%s"}
                 ]}
-                """;
+                """.formatted(START, END, START_DATE.plusDays(3), START_DATE.plusDays(4));
             mvc.perform(post(PATH).contentType(MediaType.APPLICATION_JSON).content(batch(CREATE)))
                     .andExpect(status().isBadRequest())
                     .andExpect(jsonPath("$.violations[0].field").value("Idempotency-Key"));
@@ -805,13 +809,13 @@ class ReservationIT extends PostgresIntegrationTest {
                     CREATE.replace("ORDER-001", "X".repeat(65)),
                     CREATE.replace("\"CUSTOMER-001\"", "null"),
                     CREATE.replace("\"ORDER-001\"", "{}"),
-                    CREATE.replace("\"2026-10-01\"", "null"),
-                    CREATE.replace("\"2026-10-01\"", "123"),
-                    CREATE.replace("2026-10-01", "2026-10-04"),
-                    CREATE.replace("2026-10-01", "2026-02-30"),
-                    CREATE.replace("2026-10-01", "0000-01-01"),
-                    CREATE.replace("2026-10-03", "+10000-01-01"),
-                    CREATE.replace("2026-10-01", "2026-10-01T12:00:00Z"),
+                    CREATE.replace("\"" + START + "\"", "null"),
+                    CREATE.replace("\"" + START + "\"", "123"),
+                    CREATE.replace(START, START_DATE.plusDays(3).toString()),
+                    CREATE.replace(START, "2026-02-30"),
+                    CREATE.replace(START, "0000-01-01"),
+                    CREATE.replace(END, "+10000-01-01"),
+                    CREATE.replace(START, START + "T12:00:00Z"),
                     withStatus(CREATE, "HELD"),
                     CREATE.replace("}", ",\"id\":\"ef469102-af79-4a47-9afb-f34937c9481f\"}"),
                     CREATE.replace("}", ",\"timestamp\":\"2026-01-01T00:00:00Z\"}"),
@@ -829,7 +833,7 @@ class ReservationIT extends PostgresIntegrationTest {
                     withStatus(CREATE, "EXPIRED"),
                     withStatus(CREATE, "held"),
                     withStatus(CREATE, "0"),
-                    withStatus(CREATE, "HELD").replace("2026-10-03", "2026-09-30"),
+                    withStatus(CREATE, "HELD").replace(END, "2026-09-30"),
                     withStatus(CREATE, "HELD").replace("}", ",\"id\":\"" + id + "\"}"))) {
                 mvc.perform(put(PATH + "/" + id)
                                 .contentType(MediaType.APPLICATION_JSON)
@@ -841,9 +845,12 @@ class ReservationIT extends PostgresIntegrationTest {
         }
 
         @ParameterizedTest
-        @ValueSource(strings = {"2026-10-01", "9999-12-31"})
+        @ValueSource(strings = {"current", "9999-12-31"})
         void acceptsSameDayCurrentOrFuturePeriods(String day) throws Exception {
-            create(CREATE.replace("2026-10-01", day).replace("2026-10-03", day));
+            String date = day.equals("current")
+                    ? creationRequestRepository.databaseUtcDate().toString()
+                    : day;
+            create(CREATE.replace(START, date).replace(END, date));
         }
 
         @ParameterizedTest
@@ -870,8 +877,8 @@ class ReservationIT extends PostgresIntegrationTest {
                     valid.replace("\"serialNumber\":\"DRILL-001\",", ""),
                     valid.replace("\"customerId\":\"CUSTOMER-001\",", ""),
                     valid.replace("\"orderId\":\"ORDER-001\",", ""),
-                    valid.replace("\"startDate\":\"2026-10-01\",", ""),
-                    valid.replace("\"endDate\":\"2026-10-03\",", ""),
+                    valid.replace("\"startDate\":\"" + START + "\",", ""),
+                    valid.replace("\"endDate\":\"" + END + "\",", ""),
                     CREATE,
                     valid.replace("DRILL-001", ""),
                     valid.replace("DRILL-001", "/bad"),
@@ -885,8 +892,8 @@ class ReservationIT extends PostgresIntegrationTest {
                     valid.replace("\"CONFIRMED\"", "null"),
                     valid.replace("\"CONFIRMED\"", "1"),
                     valid.replace("\"CONFIRMED\"", "true"),
-                    valid.replace("2026-10-01", "2026-02-30"),
-                    valid.replace("2026-10-03", "2026-09-30"),
+                    valid.replace(START, "2026-02-30"),
+                    valid.replace(END, "2026-09-30"),
                     valid.replace("}", ",\"unknown\":true}"),
                     valid.replace("}", ",\"id\":null}"),
                     valid.replace("}", ",\"id\":\"ef469102-af79-4a47-9afb-f34937c9481f\"}"),
@@ -972,7 +979,8 @@ class ReservationIT extends PostgresIntegrationTest {
             List<JsonNode> expected = new ArrayList<>();
             for (int i = 0; i < 3; i++) {
                 String suffix = "%03d".formatted(i + 1);
-                String input = CREATE.replace("001", suffix).replace("2026-10-01", "2026-10-0" + (i + 1));
+                String input = CREATE.replace("001", suffix)
+                        .replace(START, START_DATE.plusDays(i).toString());
                 JsonNode created = create(input);
                 String replacement = withStatus(input, i == 0 ? "CANCELLED" : "CONFIRMED");
                 expected.add(
@@ -1049,12 +1057,13 @@ class ReservationIT extends PostgresIntegrationTest {
 
         @Test
         void healthProbesExposeOnlyStatusAndOtherActuatorEndpointsStayHidden() throws Exception {
-            for (String path : List.of("/livez", "/readyz", "/actuator/health")) {
+            for (String path : List.of("/livez", "/readyz")) {
                 mvc.perform(get(path))
                         .andExpect(status().isOk())
                         .andExpect(jsonPath("$.status").value("UP"))
                         .andExpect(jsonPath("$.components").doesNotExist());
             }
+            mvc.perform(get("/actuator/health")).andExpect(status().isNotFound());
             mvc.perform(get("/actuator/env")).andExpect(status().isNotFound());
         }
     }

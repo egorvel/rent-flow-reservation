@@ -64,7 +64,7 @@ class ReservationHoldExpirationMigrationIT {
                     """);
         }
 
-        migrate(null);
+        migrate("4");
 
         ObjectMapper mapper = new ObjectMapper();
         try (Connection connection = connection()) {
@@ -83,6 +83,33 @@ class ReservationHoldExpirationMigrationIT {
             JsonNode failure = mapper.readTree(outcome(connection, failureKey));
             assertThat(failure.at("/reservations/0/holdExpiresAt").isMissingNode())
                     .isTrue();
+        }
+        UUID eventId = UUID.randomUUID();
+        try (Connection connection = connection();
+                PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO reservation.reservation_cancellation_outbox
+                        (event_id, record_key, payload, occurred_at, next_attempt_at)
+                    VALUES (?, 'MIGRATE-OUTBOX', '{"eventId":"legacy"}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """)) {
+            insert.setObject(1, eventId);
+            insert.executeUpdate();
+        }
+        migrate(null);
+        try (Connection connection = connection();
+                PreparedStatement select = connection.prepareStatement("""
+                    SELECT record_key, payload, attempt_count, published_at, traceparent, tracestate
+                    FROM reservation.reservation_cancellation_outbox WHERE event_id = ?
+                    """)) {
+            select.setObject(1, eventId);
+            try (ResultSet result = select.executeQuery()) {
+                assertThat(result.next()).isTrue();
+                assertThat(result.getString(1)).isEqualTo("MIGRATE-OUTBOX");
+                assertThat(result.getString(2)).isEqualTo("{\"eventId\":\"legacy\"}");
+                assertThat(result.getInt(3)).isZero();
+                assertThat(result.getObject(4)).isNull();
+                assertThat(result.getString(5)).isNull();
+                assertThat(result.getString(6)).isNull();
+            }
         }
     }
 

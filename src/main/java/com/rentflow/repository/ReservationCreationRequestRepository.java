@@ -11,6 +11,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
+import com.rentflow.model.ReservationBacklog;
 import com.rentflow.model.ReservationCreationRequest;
 
 public interface ReservationCreationRequestRepository extends JpaRepository<ReservationCreationRequest, UUID> {
@@ -48,4 +49,17 @@ public interface ReservationCreationRequestRepository extends JpaRepository<Rese
             WHERE expires_at <= statement_timestamp()
             """, nativeQuery = true)
     long countExpired();
+
+    @Query(value = """
+            WITH measured AS MATERIALIZED (SELECT clock_timestamp() AS at)
+            SELECT count(entry.idempotency_key) AS backlog,
+                   0 AS "oldestAge",
+                   EXTRACT(EPOCH FROM measured.at) AS "measuredAt"
+            FROM measured LEFT JOIN reservation.reservation_creation_requests entry ON entry.expires_at <= measured.at
+            GROUP BY measured.at
+            """, nativeQuery = true)
+    ReservationBacklog monitoringSnapshot();
+
+    @Query(value = "SELECT set_config('statement_timeout', :milliseconds, true)", nativeQuery = true)
+    String configureMonitoringTimeout(String milliseconds);
 }

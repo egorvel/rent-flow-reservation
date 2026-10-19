@@ -14,7 +14,20 @@ import org.springframework.validation.annotation.Validated;
 @Validated
 @ConfigurationProperties("reservation")
 public record ReservationProperties(
-        @Valid @NotNull Creation creation, @Valid @NotNull Cancellation cancellation) {
+        @Valid @NotNull Creation creation,
+        @Valid @NotNull Cancellation cancellation,
+        @Valid @NotNull Observability observability) {
+
+    public record Observability(
+            @NotNull Duration operationalBacklogFixedDelay,
+            @NotNull Duration cleanupBacklogFixedDelay,
+            @NotNull Duration queryTimeout) {
+        public Observability {
+            requireMonitoringDuration(operationalBacklogFixedDelay, "observability.operationalBacklogFixedDelay");
+            requireMonitoringDuration(cleanupBacklogFixedDelay, "observability.cleanupBacklogFixedDelay");
+            requireMonitoringDuration(queryTimeout, "observability.queryTimeout");
+        }
+    }
 
     public record Creation(@Valid @NotNull Cleanup cleanup) {
         public record Cleanup(
@@ -88,6 +101,15 @@ public record ReservationProperties(
     private static void requirePositive(Duration value, String name) {
         if (value != null && (value.isNegative() || value.isZero())) {
             throw new IllegalArgumentException(name + " must be positive");
+        }
+    }
+
+    private static void requireMonitoringDuration(Duration value, String name) {
+        if (value != null
+                && (value.compareTo(Duration.ofMillis(1)) < 0
+                        || value.compareTo(Duration.ofSeconds(Integer.MAX_VALUE)) > 0)) {
+            throw new IllegalArgumentException(
+                    name + " must be at least one millisecond and no greater than Integer.MAX_VALUE seconds");
         }
     }
 }

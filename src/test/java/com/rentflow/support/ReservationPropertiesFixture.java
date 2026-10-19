@@ -50,7 +50,9 @@ public final class ReservationPropertiesFixture {
                                 Duration.ofSeconds(1), 2, Duration.ofMinutes(5), 0.2),
                         new ReservationProperties.Cancellation.Cleanup(true, "0 30 3 * * *", Duration.ofSeconds(60)),
                         new ReservationProperties.Cancellation.Expiration(
-                                true, Duration.ofMinutes(10), Duration.ofSeconds(5), Duration.ofSeconds(5), 100)));
+                                true, Duration.ofMinutes(10), Duration.ofSeconds(5), Duration.ofSeconds(5), 100)),
+                new ReservationProperties.Observability(
+                        Duration.ofSeconds(15), Duration.ofMinutes(1), Duration.ofSeconds(5)));
     }
 
     private static ReservationRuntimeSettings runtimeSettings(
@@ -67,6 +69,7 @@ public final class ReservationPropertiesFixture {
                                 Duration.ofSeconds(1), 2, Duration.ofMinutes(5), 0.2),
                         new ReservationRuntimeSettings.Cancellation.Cleanup(true, Duration.ofSeconds(60)),
                         new ReservationRuntimeSettings.Cancellation.Expiration(
-                                Duration.ofMinutes(10), Duration.ofSeconds(5), 100)));
+                                Duration.ofMinutes(10), Duration.ofSeconds(5), 100)),
+                new ReservationRuntimeSettings.Observability(Duration.ofSeconds(5)));
     }
 }

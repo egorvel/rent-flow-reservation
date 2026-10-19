@@ -1,7 +1,7 @@
 package com.rentflow.service;
 
+import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
@@ -12,10 +12,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import com.rentflow.model.ReservationStatus;
-import com.rentflow.repository.ReservationRepository;
-
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 
 @Service
 @ConditionalOnProperty(
@@ -26,36 +25,40 @@ public class ReservationHoldExpirationScheduledService {
     private static final Logger LOGGER = LoggerFactory.getLogger(ReservationHoldExpirationScheduledService.class);
 
     private final ReservationCancellationService cancellation;
-    private final ReservationRepository reservations;
     private final MeterRegistry metrics;
+    private final ObservationRegistry observations;
+    private final Clock clock;
     private final int maxReservationsPerRun;
     private final long budgetNanos;
     private final LongSupplier nanoTime;
-    private final AtomicLong overdue = new AtomicLong();
-    private final AtomicLong oldestAgeSeconds = new AtomicLong();
+    private final AtomicLong lastRun = new AtomicLong();
+    private final AtomicLong lastSuccess = new AtomicLong();
 
     @Autowired
     public ReservationHoldExpirationScheduledService(
             ReservationCancellationService cancellation,
-            ReservationRepository reservations,
             MeterRegistry metrics,
-            ReservationRuntimeSettings settings) {
+            ReservationRuntimeSettings settings,
+            ObservationRegistry observations,
+            Clock clock) {
         this(
                 cancellation,
-                reservations,
                 metrics,
                 settings.cancellation().expiration().maxReservationsPerRun(),
                 settings.cancellation().expiration().runtimeBudget(),
-                System::nanoTime);
+                System::nanoTime,
+                observations,
+                clock);
     }
 
     ReservationHoldExpirationScheduledService(
             ReservationCancellationService cancellation,
-            ReservationRepository reservations,
             MeterRegistry metrics,
             int maxReservationsPerRun,
             Duration runtimeBudget,
-            LongSupplier nanoTime) {
+            LongSupplier nanoTime,
+            ObservationRegistry observations,
+            Clock clock) {
         if (maxReservationsPerRun <= 0) {
             throw new IllegalArgumentException("Expiration run limit must be positive");
         }
@@ -63,20 +66,32 @@ public class ReservationHoldExpirationScheduledService {
             throw new IllegalArgumentException("Expiration runtime budget must be positive");
         }
         this.cancellation = cancellation;
-        this.reservations = reservations;
         this.metrics = metrics;
+        this.observations = observations;
+        this.clock = clock;
         this.maxReservationsPerRun = maxReservationsPerRun;
         this.budgetNanos = runtimeBudget.toNanos();
         this.nanoTime = nanoTime;
-        metrics.gauge("reservation.cancellation.expiration.overdue", overdue);
-        metrics.gauge("reservation.cancellation.expiration.oldest.age", oldestAgeSeconds);
+        io.micrometer.core.instrument.Gauge.builder(
+                        "reservation.worker.last.run.timestamp", lastRun, AtomicLong::doubleValue)
+                .tag("worker", "expiration")
+                .register(metrics);
+        io.micrometer.core.instrument.Gauge.builder(
+                        "reservation.worker.last.success.timestamp", lastSuccess, AtomicLong::doubleValue)
+                .tag("worker", "expiration")
+                .register(metrics);
     }
 
     @Scheduled(fixedDelayString = "${reservation.cancellation.expiration.fixed-delay}")
     public void expire() {
         long started = nanoTime.getAsLong();
         int expired = 0;
-        try {
+        boolean failed = false;
+        lastRun.set(clock.instant().getEpochSecond());
+        Observation observation = Observation.createNotStarted("reservation.worker.run", observations)
+                .lowCardinalityKeyValue("worker", "expiration")
+                .start();
+        try (Observation.Scope ignored = observation.openScope()) {
             while (expired < maxReservationsPerRun && nanoTime.getAsLong() - started < budgetNanos) {
                 ReservationCancellationService.ExpirationResult result = cancellation.expireOldestHeld();
                 if (result != ReservationCancellationService.ExpirationResult.EXPIRED) {
@@ -87,25 +102,21 @@ public class ReservationHoldExpirationScheduledService {
                 expired++;
             }
         } catch (RuntimeException exception) {
+            failed = true;
+            observation.error(exception);
             metrics.counter("reservation.cancellation.expiration.failures").increment();
-            LOGGER.warn("Reservation hold expiration failed; the next scheduled run will retry.");
+            LOGGER.warn("Reservation hold expiration failed; the next scheduled run will retry.", exception);
+        } catch (Error failure) {
+            failed = true;
+            observation.error(failure);
+            throw failure;
         } finally {
-            refreshBacklog();
-        }
-    }
-
-    private void refreshBacklog() {
-        try {
-            Instant databaseTime = reservations.databaseTime();
-            overdue.set(reservations.countByStatusAndHoldExpiresAtLessThanEqual(ReservationStatus.HELD, databaseTime));
-            long age = reservations
-                    .oldestOverdueHoldExpiresAt(ReservationStatus.HELD, databaseTime)
-                    .map(oldest ->
-                            Math.max(0L, Duration.between(oldest, databaseTime).toSeconds()))
-                    .orElse(0L);
-            oldestAgeSeconds.set(age);
-        } catch (RuntimeException exception) {
-            LOGGER.warn("Reservation hold expiration backlog metrics could not be refreshed.");
+            observation
+                    .lowCardinalityKeyValue("outcome", failed ? "error" : "success")
+                    .stop();
+            if (!failed) {
+                lastSuccess.set(clock.instant().getEpochSecond());
+            }
         }
     }
 }

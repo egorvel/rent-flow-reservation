@@ -25,12 +25,18 @@ class ReservationHoldExpirationScheduledServiceTest {
     private ReservationCancellationService cancellation;
     private ReservationRepository reservations;
     private SimpleMeterRegistry metrics;
+    private io.micrometer.observation.ObservationRegistry observations;
 
     @BeforeEach
     void setUp() {
         cancellation = mock(ReservationCancellationService.class);
         reservations = mock(ReservationRepository.class);
         metrics = new SimpleMeterRegistry();
+        observations = io.micrometer.observation.ObservationRegistry.create();
+        observations
+                .observationConfig()
+                .observationHandler(
+                        new io.micrometer.core.instrument.observation.DefaultMeterObservationHandler(metrics));
         when(reservations.databaseTime()).thenReturn(DATABASE_TIME);
         when(reservations.oldestOverdueHoldExpiresAt(ReservationStatus.HELD, DATABASE_TIME))
                 .thenReturn(Optional.empty());
@@ -70,30 +76,33 @@ class ReservationHoldExpirationScheduledServiceTest {
     }
 
     @Test
-    void recordsFailureAndRefreshesBacklog() {
+    void recordsFailureWithoutClaimingWorkerSuccess() {
         when(cancellation.expireOldestHeld()).thenThrow(new IllegalStateException("database unavailable"));
-        when(reservations.countByStatusAndHoldExpiresAtLessThanEqual(ReservationStatus.HELD, DATABASE_TIME))
-                .thenReturn(3L);
-        when(reservations.oldestOverdueHoldExpiresAt(ReservationStatus.HELD, DATABASE_TIME))
-                .thenReturn(Optional.of(DATABASE_TIME.minusSeconds(20)));
-
         scheduler(100, () -> 0L).expire();
-
         assertThat(metrics.counter("reservation.cancellation.expiration.failures")
                         .count())
                 .isOne();
-        assertThat(metrics.get("reservation.cancellation.expiration.overdue")
+        assertThat(metrics.get("reservation.worker.last.run.timestamp")
+                        .tag("worker", "expiration")
                         .gauge()
                         .value())
-                .isEqualTo(3);
-        assertThat(metrics.get("reservation.cancellation.expiration.oldest.age")
+                .isPositive();
+        assertThat(metrics.get("reservation.worker.last.success.timestamp")
+                        .tag("worker", "expiration")
                         .gauge()
                         .value())
-                .isEqualTo(20);
+                .isZero();
+        org.mockito.Mockito.verifyNoInteractions(reservations);
     }
 
     private ReservationHoldExpirationScheduledService scheduler(int maxReservations, LongSupplier nanoTime) {
         return new ReservationHoldExpirationScheduledService(
-                cancellation, reservations, metrics, maxReservations, Duration.ofSeconds(5), nanoTime);
+                cancellation,
+                metrics,
+                maxReservations,
+                Duration.ofSeconds(5),
+                nanoTime,
+                observations,
+                java.time.Clock.systemUTC());
     }
 }

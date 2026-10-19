@@ -45,7 +45,11 @@ class RestInventoryServiceTest {
     void setUp() {
         RetryConfig retryConfig = RetryConfig.custom().maxAttempts(1).build();
         service = new RestInventoryService(
-                client, CircuitBreakerRegistry.ofDefaults(), RetryRegistry.of(retryConfig), new ObjectMapper());
+                client,
+                CircuitBreakerRegistry.ofDefaults(),
+                RetryRegistry.of(retryConfig),
+                new ObjectMapper(),
+                io.micrometer.observation.ObservationRegistry.NOOP);
     }
 
     @Test
@@ -172,7 +176,11 @@ class RestInventoryServiceTest {
                 .retryOnException(new InventoryRetryableExceptionPredicate())
                 .build();
         service = new RestInventoryService(
-                client, CircuitBreakerRegistry.ofDefaults(), RetryRegistry.of(retryConfig), new ObjectMapper());
+                client,
+                CircuitBreakerRegistry.ofDefaults(),
+                RetryRegistry.of(retryConfig),
+                new ObjectMapper(),
+                io.micrometer.observation.ObservationRegistry.NOOP);
     }
 
     private HttpClientErrorException clientError(HttpStatus status, String body) {

@@ -1,5 +1,6 @@
 package com.rentflow.service;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntSupplier;
@@ -13,6 +14,8 @@ import org.springframework.stereotype.Service;
 
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 
 @Service
 public class ReservationCleanupScheduledService {
@@ -25,19 +28,29 @@ public class ReservationCleanupScheduledService {
     private final long cancellationBudgetNanos;
     private final boolean cancellationEnabled;
     private final LongSupplier nanoTime;
-    private final AtomicLong creationBacklog = new AtomicLong();
-    private final AtomicLong cancellationBacklog = new AtomicLong();
+    private final AtomicLong creationLastRun = new AtomicLong();
+    private final AtomicLong creationLastSuccess = new AtomicLong();
+    private final AtomicLong cancellationLastRun = new AtomicLong();
+    private final AtomicLong cancellationLastSuccess = new AtomicLong();
+    private final ObservationRegistry observations;
+    private final Clock clock;
 
     @Autowired
     public ReservationCleanupScheduledService(
-            ReservationCleanupService cleanup, MeterRegistry metrics, ReservationRuntimeSettings settings) {
+            ReservationCleanupService cleanup,
+            MeterRegistry metrics,
+            ReservationRuntimeSettings settings,
+            ObservationRegistry observations,
+            Clock clock) {
         this(
                 cleanup,
                 metrics,
                 settings.creation().cleanup().runtimeBudget(),
                 settings.cancellation().cleanup().runtimeBudget(),
                 settings.cancellation().cleanup().enabled(),
-                System::nanoTime);
+                System::nanoTime,
+                observations,
+                clock);
     }
 
     ReservationCleanupScheduledService(
@@ -46,7 +59,9 @@ public class ReservationCleanupScheduledService {
             Duration creationBudget,
             Duration cancellationBudget,
             boolean cancellationEnabled,
-            LongSupplier nanoTime) {
+            LongSupplier nanoTime,
+            ObservationRegistry observations,
+            Clock clock) {
         requirePositive(creationBudget, "Creation cleanup runtime budget");
         requirePositive(cancellationBudget, "Cancellation cleanup runtime budget");
         this.cleanup = cleanup;
@@ -55,19 +70,31 @@ public class ReservationCleanupScheduledService {
         this.cancellationBudgetNanos = cancellationBudget.toNanos();
         this.cancellationEnabled = cancellationEnabled;
         this.nanoTime = nanoTime;
-        metrics.gauge("reservation.creation.cleanup.expired.backlog", creationBacklog);
-        if (cancellationEnabled) {
-            metrics.gauge("reservation.cancellation.outbox.cleanup.backlog", cancellationBacklog);
-        }
+        this.observations = observations;
+        this.clock = clock;
+        registerTimestamps("creation_cleanup", creationLastRun, creationLastSuccess);
+        registerTimestamps("outbox_cleanup", cancellationLastRun, cancellationLastSuccess);
+    }
+
+    private void registerTimestamps(String worker, AtomicLong run, AtomicLong success) {
+        io.micrometer.core.instrument.Gauge.builder(
+                        "reservation.worker.last.run.timestamp", run, AtomicLong::doubleValue)
+                .tag("worker", worker)
+                .register(metrics);
+        io.micrometer.core.instrument.Gauge.builder(
+                        "reservation.worker.last.success.timestamp", success, AtomicLong::doubleValue)
+                .tag("worker", worker)
+                .register(metrics);
     }
 
     @Scheduled(cron = "${reservation.creation.cleanup.cron}", zone = "UTC")
     public void cleanCreationRequests() {
         clean(
                 cleanup::deleteExpiredCreationChunk,
-                cleanup::countExpiredCreationRequests,
                 creationBudgetNanos,
-                creationBacklog,
+                creationLastRun,
+                creationLastSuccess,
+                "creation_cleanup",
                 "reservation.creation.cleanup",
                 "Reservation creation cleanup failed; the next scheduled run will retry.");
     }
@@ -79,33 +106,51 @@ public class ReservationCleanupScheduledService {
         }
         clean(
                 cleanup::deletePublishedCancellationChunk,
-                cleanup::countCancellationCleanupBacklog,
                 cancellationBudgetNanos,
-                cancellationBacklog,
+                cancellationLastRun,
+                cancellationLastSuccess,
+                "outbox_cleanup",
                 "reservation.cancellation.outbox.cleanup",
                 "Reservation cancellation outbox cleanup failed; the next scheduled run will retry.");
     }
 
     private void clean(
             IntSupplier deleteChunk,
-            LongSupplier countBacklog,
             long budgetNanos,
-            AtomicLong backlog,
+            AtomicLong lastRun,
+            AtomicLong lastSuccess,
+            String worker,
             String metricPrefix,
             String failureMessage) {
         long started = nanoTime.getAsLong();
         Timer.Sample sample = Timer.start(metrics);
-        try {
+        boolean failed = false;
+        lastRun.set(clock.instant().getEpochSecond());
+        Observation observation = Observation.createNotStarted("reservation.worker.run", observations)
+                .lowCardinalityKeyValue("worker", worker)
+                .start();
+        try (Observation.Scope ignored = observation.openScope()) {
             int deleted;
             do {
                 deleted = deleteChunk.getAsInt();
                 metrics.counter(metricPrefix + ".deleted").increment(deleted);
             } while (deleted == CHUNK_SIZE && nanoTime.getAsLong() - started < budgetNanos);
-            backlog.set(countBacklog.getAsLong());
         } catch (RuntimeException exception) {
+            failed = true;
+            observation.error(exception);
             metrics.counter(metricPrefix + ".failures").increment();
-            LOGGER.warn(failureMessage);
+            LOGGER.warn(failureMessage, exception);
+        } catch (Error failure) {
+            failed = true;
+            observation.error(failure);
+            throw failure;
         } finally {
+            observation
+                    .lowCardinalityKeyValue("outcome", failed ? "error" : "success")
+                    .stop();
+            if (!failed) {
+                lastSuccess.set(clock.instant().getEpochSecond());
+            }
             sample.stop(metrics.timer(metricPrefix + ".duration"));
         }
     }
