@@ -163,7 +163,7 @@ class ObservabilityExporterUnavailableIT extends PostgresIntegrationTest {
         java.time.LocalDate date =
                 java.time.LocalDate.now(java.time.ZoneOffset.UTC).plusDays(1);
         String body = """
-                {"customerId":"private-customer","orderId":"private-order","items":[
+                {"orderId":"private-order","items":[
                  {"serialNumber":"%s","startDate":"%s","endDate":"%s"}]}
                 """.formatted(serial, date, date);
         HttpResponse<String> created = request(client, "/api/v1/reservations", "POST", body);
@@ -187,6 +187,7 @@ class ObservabilityExporterUnavailableIT extends PostgresIntegrationTest {
         // Shorter than the unchanged 2s exporter timeout: synchronous delivery would fail this bound.
         HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .timeout(Duration.ofSeconds(1))
+                .header("Authorization", "Bearer " + com.rentflow.support.SignedJwtFixture.SHARED.staff())
                 .header("Content-Type", "application/json")
                 .header("Idempotency-Key", java.util.UUID.randomUUID().toString())
                 .method(

@@ -1,5 +1,14 @@
 # Reservation Service Skeleton Tasks
 
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+Batch creation and hold metadata are defined by [creation](../reservation-creation/design.md)
+and [cancellation](../reservation-cancellation/design.md); they supersede the original single-item
+POST, Location header and date rules in the skeleton baseline.
+
 ## 1. Delivery
 
 Each task is one safe, reviewable commit-sized increment. Dependencies are explicit below;
@@ -35,7 +44,7 @@ are to this feature's requirements.md and design.md. No shipped migration is edi
 **DoD.**
 
 - Full-stack tests assert credential-free POST 201/Location/HELD, GET all eight persisted values, and repeated serial/customer acceptance with distinct IDs.
-- PUT changes every mutable field including all status values, keeps ID/timestamp, and never upserts; rejected writes preserve original data. DELETE returns empty 204 and subsequent GET and DELETE return 404.
+- PUT changes the five mutable fields including all status values, keeps the original owner and ID/timestamp, and never upserts; rejected writes preserve original data. DELETE returns empty 204 and subsequent GET and DELETE return 404.
 - Parameterized tests reject missing/unknown/server-managed properties, malformed JSON, unconvertible field types and values failing validation after default string conversion, invalid UUIDs/status/date ranges; same-day and historical periods succeed.
 - Paging tests assert default envelope/totals, bounds, empty/out-of-range pages, all eight sorts in both directions and ID tie-breaking. Unknown/repeated/blank/overflow/unsupported collection inputs return 400.
 - Errors assert problem content type/envelope, sorted violations, 404, 405/Allow, 406, 415 and fixed sanitized 500. Unit tests use Mockito to assert service interactions and error sanitation.
@@ -81,10 +90,10 @@ are to this feature's requirements.md and design.md. No shipped migration is edi
 
 **DoD.**
 
-- PUT and its converter use `ReservationDTO`; the separate replacement request class is removed, while POST retains `CreateReservationRequest` and still creates HELD reservations.
-- All six mutable fields retain PUT validation. Missing, malformed, blank, oversized, unknown, invalid-status and invalid-period values return 400 without changing persisted data.
-- Supplying id or timestamp on PUT, including explicit null, returns 400; successful PUT preserves both, and POST/GET/PUT responses retain all eight fields.
-- OpenAPI PUT and response references share `ReservationDTO`; id/timestamp are readOnly, writable fields are required, and the documented PUT example omits managed fields and succeeds against the running API.
+- PUT and its converter use `ReservationDTO`; the separate replacement request class is removed, while POST uses the current batch `CreateReservationsRequest` without owner input and still creates HELD reservations.
+- All five mutable fields retain PUT validation. Missing, malformed, blank, oversized, unknown, invalid-status and invalid-period values return 400 without changing persisted data.
+- Supplying customerId, customerIssuer, id or timestamp on PUT, including explicit null, returns 400; successful PUT preserves the original owner and managed metadata, and POST/GET/PUT responses retain all eight fields.
+- OpenAPI PUT and response references share `ReservationDTO`; id/customerId/timestamp/holdExpiresAt are readOnly, the issuer is absent, five writable fields are required, and the documented PUT example omits managed fields and succeeds against the running API.
 - `mvn -B -ntp clean verify` returns BUILD SUCCESS with all existing checks and the added contract regression tests active; spec self-evaluation records current traceability.
 
 ### T6 — Remove custom string coercion configuration
@@ -98,7 +107,7 @@ are to this feature's requirements.md and design.md. No shipped migration is edi
 **DoD.**
 
 - Remove `JacksonConfig` without adding a replacement customizer; leave unrelated JSON settings and DTO validation unchanged.
-- POST and PUT tests prove integer, fractional and boolean identifier inputs are persisted and returned as strings, with HELD creation and unchanged ID/timestamp on replacement.
+- POST and PUT tests prove integer, fractional and boolean writable orderId inputs are persisted and returned as strings, with HELD creation and unchanged owner/ID/timestamp on replacement. Owner body inputs are rejected regardless of JSON type.
 - Tests retain rejection and non-mutation assertions for unconvertible objects/arrays, invalid statuses/dates, missing/blank/oversized values, unknown fields and managed fields.
 - `mvn -B -ntp clean verify` returns BUILD SUCCESS without skipped checks; spec self-evaluation records current traceability.
 

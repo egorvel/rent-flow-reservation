@@ -9,3 +9,5 @@ target/
 .specs/**/eval-reports/
 .env.*
 !.env.example
+
+.secrets/

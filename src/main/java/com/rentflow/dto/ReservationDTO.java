@@ -16,7 +16,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 
 @Schema(
         description =
-                "Reservation representation used for full replacement and responses; ID, timestamp, and holdExpiresAt are response-only.",
+                "Reservation representation used for full replacement and responses; ID, customerId, timestamp, and holdExpiresAt are response-only.",
         example = """
 {
   "serialNumber": "DRILL-001",
@@ -50,12 +50,12 @@ public record ReservationDTO(
         @NotBlank(message = "must not be blank") @Pattern(regexp = ReservationDTO.SERIAL_NUMBER_PATTERN, message = "must be a valid serial number") String serialNumber,
 
         @Schema(
-                description = "Opaque client-assigned customer identifier; no existence or uniqueness check.",
-                example = "CUSTOMER-001",
-                minLength = 1,
-                maxLength = 64,
+                description = "Immutable owner subject assigned from verified authentication.",
+                example = "b719b21e-ea82-4a09-912a-a680095ab6c1",
+                accessMode = Schema.AccessMode.READ_ONLY,
                 requiredMode = Schema.RequiredMode.REQUIRED)
-        @NotBlank(message = "must not be blank") @Size(max = 64, message = "must have at most 64 characters") String customerId,
+        @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+        String customerId,
 
         @Schema(
                 description = "Opaque order identifier shared by related reservations.",

@@ -4,9 +4,8 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Objects;
 
-public record ReservationCreationCommand(String customerId, String orderId, List<Item> items) {
+public record ReservationCreationCommand(String orderId, List<Item> items) {
     public ReservationCreationCommand {
-        Objects.requireNonNull(customerId);
         Objects.requireNonNull(orderId);
         items = List.copyOf(items);
     }

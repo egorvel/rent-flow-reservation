@@ -10,14 +10,13 @@ import java.util.UUID;
 import com.rentflow.model.ReservationCreationCommand;
 
 public final class IdempotencyFingerprint {
-    private static final String VERSION = "reservation-creation-v1";
+    private static final String VERSION = "reservation-creation-v2";
 
     private IdempotencyFingerprint() {}
 
     public static String of(ReservationCreationCommand command) {
         MessageDigest digest = sha256();
         add(digest, VERSION);
-        add(digest, command.customerId());
         add(digest, command.orderId());
         digest.update(ByteBuffer.allocate(Integer.BYTES)
                 .putInt(command.items().size())
@@ -30,11 +29,29 @@ public final class IdempotencyFingerprint {
         return HexFormat.of().formatHex(digest.digest());
     }
 
-    public static long lockId(UUID key) {
+    public static String callerScope(String issuer, String subject) {
+        return "p1:" + HexFormat.of().formatHex(tuple("reservation-creation:principal:v1", issuer, subject));
+    }
+
+    public static long lockId(String callerScope, UUID key) {
+        return ByteBuffer.wrap(tuple("reservation-creation:key:v2", callerScope, key.toString()))
+                .getLong();
+    }
+
+    public static UUID inventoryKey(String callerScope, UUID key) {
+        byte[] bytes = tuple("reservation-creation:inventory-key:v1", callerScope, key.toString());
+        bytes[6] = (byte) ((bytes[6] & 0x0f) | 0x40);
+        bytes[8] = (byte) ((bytes[8] & 0x3f) | 0x80);
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        return new UUID(buffer.getLong(), buffer.getLong());
+    }
+
+    private static byte[] tuple(String... values) {
         MessageDigest digest = sha256();
-        add(digest, "reservation-creation:key:v1");
-        add(digest, key.toString());
-        return ByteBuffer.wrap(digest.digest()).getLong();
+        for (String value : values) {
+            add(digest, value);
+        }
+        return digest.digest();
     }
 
     private static void add(MessageDigest digest, String value) {

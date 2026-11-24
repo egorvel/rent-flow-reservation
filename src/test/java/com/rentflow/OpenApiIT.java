@@ -39,14 +39,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest
+@SpringBootTest(properties = {"springdoc.api-docs.enabled=true", "springdoc.swagger-ui.enabled=true"})
+@org.springframework.test.context.ActiveProfiles({"test", "local"})
 @AutoConfigureMockMvc
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class OpenApiIT extends PostgresIntegrationTest {
     private static final String COLLECTION = "/api/v1/reservations";
     private static final String ITEM = COLLECTION + "/{id}";
     private static final String CANCELLATION = ITEM + "/cancel";
-    private static final Set<String> INPUT_FIELDS = Set.of("customerId", "orderId", "items");
+    private static final Set<String> INPUT_FIELDS = Set.of("orderId", "items");
 
     @Autowired
     private MockMvc mvc;
@@ -87,12 +88,38 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertThat(operation(ITEM, "delete").path("operationId").asString()).isEqualTo("deleteReservation");
         assertThat(operation(CANCELLATION, "post").path("operationId").asString())
                 .isEqualTo("cancelReservation");
-        assertThat(document.at("/components/securitySchemes").isMissingNode()).isTrue();
+        assertThat(document.at("/components/securitySchemes").propertyNames())
+                .containsExactlyInAnyOrder("bearerJwt", "reservationOidc");
+        for (String path : List.of(COLLECTION, ITEM, CANCELLATION)) {
+            for (JsonNode operation : document.path("paths").path(path)) {
+                assertThat(operation.path("security").size()).isEqualTo(2);
+                assertThat(operation.path("responses").has("401")).isTrue();
+                assertThat(operation.path("responses").has("403")).isTrue();
+                assertThat(operation.path("description").asString()).contains("reservation:");
+            }
+        }
         mvc.perform(get("/swagger-ui.html")).andExpect(status().is3xxRedirection());
         mvc.perform(get("/swagger-ui/index.html"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("Swagger UI")));
         assertReferencesResolve(document);
+    }
+
+    @Test
+    void usesOnlyThePublicPkceClientAndRejectsSuppliedInvalidCredentialsOnLocalDocs() throws Exception {
+        assertThat(document.at("/components/securitySchemes/reservationOidc/flows/authorizationCode/authorizationUrl")
+                        .asString())
+                .isEqualTo(com.rentflow.support.SignedJwtFixture.SHARED.issuer() + "/protocol/openid-connect/auth");
+        assertThat(document.at("/components/securitySchemes/reservationOidc/flows/authorizationCode/scopes")
+                        .propertyNames())
+                .containsExactly("openid");
+        mvc.perform(get("/v3/api-docs").header("Authorization", "Bearer malformed"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("AUTHENTICATION_REQUIRED"));
+        mvc.perform(get("/swagger-ui/swagger-initializer.js"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("reservation-swagger")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("usePkceWithAuthorizationCodeGrant")));
     }
 
     @Test
@@ -109,14 +136,14 @@ class OpenApiIT extends PostgresIntegrationTest {
                                 .path("readOnly")
                                 .asBoolean())
                         .toList())
-                .containsExactlyInAnyOrder("serialNumber", "customerId", "orderId", "startDate", "endDate", "status");
+                .containsExactlyInAnyOrder("serialNumber", "orderId", "startDate", "endDate", "status");
         assertThat(strings(response.path("required")).stream()
                         .filter(name -> !response.path("properties")
                                 .path(name)
                                 .path("readOnly")
                                 .asBoolean())
                         .toList())
-                .containsExactlyInAnyOrder("serialNumber", "customerId", "orderId", "startDate", "endDate", "status");
+                .containsExactlyInAnyOrder("serialNumber", "orderId", "startDate", "endDate", "status");
         assertThat(response.path("properties").propertyNames())
                 .containsExactlyInAnyOrder(
                         "id",
@@ -151,12 +178,12 @@ class OpenApiIT extends PostgresIntegrationTest {
             assertThat(properties.at("/serialNumber/pattern").asString())
                     .isEqualTo(ReservationDTO.SERIAL_NUMBER_PATTERN);
             assertThat(properties.at("/serialNumber/maxLength").asInt()).isEqualTo(64);
-            assertThat(properties.at("/customerId/maxLength").asInt()).isEqualTo(64);
+            assertThat(properties.at("/customerId/readOnly").asBoolean()).isTrue();
             assertThat(properties.at("/orderId/maxLength").asInt()).isEqualTo(64);
             assertThat(properties.at("/startDate/format").asString()).isEqualTo("date");
             assertThat(properties.at("/endDate/format").asString()).isEqualTo("date");
         }
-        assertThat(create.at("/properties/customerId/maxLength").asInt()).isEqualTo(64);
+        assertThat(create.at("/properties/customerId").isMissingNode()).isTrue();
         assertThat(create.at("/properties/orderId/maxLength").asInt()).isEqualTo(64);
         assertThat(create.at("/properties/items/minItems").asInt()).isEqualTo(1);
         assertThat(create.at("/properties/items/maxItems").asInt()).isEqualTo(100);
@@ -277,7 +304,7 @@ class OpenApiIT extends PostgresIntegrationTest {
             replacementExample = mapper.readTree(replacementExample.asString());
         }
         assertThat(replacementExample.propertyNames())
-                .containsExactlyInAnyOrder("serialNumber", "customerId", "orderId", "startDate", "endDate", "status");
+                .containsExactlyInAnyOrder("serialNumber", "orderId", "startDate", "endDate", "status");
         ReservationDTO request = mapper.treeToValue(replacementExample, ReservationDTO.class);
         assertThat(validator.validate(request)).isEmpty();
         assertThat(request.id()).isNull();
@@ -285,7 +312,6 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertThat(request.holdExpiresAt()).isNull();
 
         CreateReservationsRequest creation = new CreateReservationsRequest(
-                request.customerId(),
                 request.orderId(),
                 List.of(new CreateReservationItemRequest(
                         request.serialNumber(),

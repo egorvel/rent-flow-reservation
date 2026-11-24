@@ -39,7 +39,6 @@ class ReservationCreationServiceTest {
     private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
     private final ObservationRegistry observations = ObservationRegistry.create();
     private final ReservationCreationCommand command = new ReservationCreationCommand(
-            "customer",
             "order",
             List.of(new ReservationCreationCommand.Item(
                     "TEST-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3))));
@@ -47,9 +46,16 @@ class ReservationCreationServiceTest {
 
     @BeforeEach
     void setUp() {
+        com.rentflow.support.SignedJwtFixture.authenticateStaff();
         observations.observationConfig().observationHandler(new DefaultMeterObservationHandler(metrics));
         service = new ReservationCreationService(
-                requests, reservations, inventory, metrics, observations, ReservationPropertiesFixture.defaults());
+                requests,
+                reservations,
+                inventory,
+                metrics,
+                observations,
+                ReservationPropertiesFixture.defaults(),
+                new CustomerIdentityService());
         when(requests.tryExecutionLock(anyLong())).thenReturn(true);
         when(requests.databaseTime()).thenReturn(Instant.parse("2026-10-01T00:00:00Z"));
         when(requests.databaseUtcDate()).thenReturn(LocalDate.of(2026, 10, 1));
@@ -61,6 +67,7 @@ class ReservationCreationServiceTest {
     @AfterEach
     void clearTransaction() {
         TransactionSynchronizationManager.clearSynchronization();
+        org.springframework.security.core.context.SecurityContextHolder.clearContext();
         metrics.close();
     }
 
@@ -111,12 +118,17 @@ class ReservationCreationServiceTest {
     @Test
     void busyAndReplaySkipCommitCallbacksAndRestoreCallerScope() {
         UUID key = UUID.randomUUID();
-        ReservationCreationRequest stored = new ReservationCreationRequest(key);
+        String callerScope =
+                IdempotencyFingerprint.callerScope(com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff");
+        ReservationCreationRequest stored =
+                new ReservationCreationRequest(new com.rentflow.model.ReservationCreationRequestId(callerScope, key));
         stored.complete(
                 IdempotencyFingerprint.of(command),
                 ReservationCreationOutcomes.success(List.of()),
-                requests.databaseTime());
-        when(requests.findForUpdateByIdempotencyKey(key)).thenReturn(java.util.Optional.of(stored));
+                requests.databaseTime(),
+                "staff");
+        when(requests.findForUpdateById(new com.rentflow.model.ReservationCreationRequestId(callerScope, key)))
+                .thenReturn(java.util.Optional.of(stored));
         Observation parent = Observation.start("caller", observations);
         try (Observation.Scope ignored = parent.openScope()) {
             assertThat(service.create(key, command).replayed()).isTrue();
@@ -149,7 +161,6 @@ class ReservationCreationServiceTest {
     @Test
     void validationAndActiveConflictCommitTheirOwnBoundedOutcomes() {
         ReservationCreationCommand invalid = new ReservationCreationCommand(
-                "customer",
                 "order",
                 List.of(new ReservationCreationCommand.Item(
                         "TEST-001", LocalDate.of(2026, 9, 1), LocalDate.of(2026, 9, 2))));
@@ -164,7 +175,12 @@ class ReservationCreationServiceTest {
         TransactionSynchronizationManager.initSynchronization();
         when(reservations.findAllBySerialNumberInAndStatusInAndEndDateGreaterThanEqual(any(), any(), any()))
                 .thenReturn(List.of(new com.rentflow.model.Reservation(
-                        "TEST-001", "customer", "order", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3))));
+                        "TEST-001",
+                        "customer",
+                        "https://issuer.example",
+                        "order",
+                        LocalDate.of(2026, 10, 1),
+                        LocalDate.of(2026, 10, 3))));
         assertThat(service.create(UUID.randomUUID(), command).code()).isEqualTo("ACTIVE_RESERVATION_EXISTS");
         TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
         assertThat(metrics.get("reservation.creation.committed")
@@ -186,7 +202,13 @@ class ReservationCreationServiceTest {
             }
         };
         ReservationCreationService observed = new ReservationCreationService(
-                requests, reservations, inventory, failing, observations, ReservationPropertiesFixture.defaults());
+                requests,
+                reservations,
+                inventory,
+                failing,
+                observations,
+                ReservationPropertiesFixture.defaults(),
+                new CustomerIdentityService());
         assertThat(observed.create(UUID.randomUUID(), command).status()).isEqualTo(201);
         org.assertj.core.api.Assertions.assertThatCode(() -> TransactionSynchronizationManager.getSynchronizations()
                         .forEach(TransactionSynchronization::afterCommit))

@@ -36,12 +36,20 @@ public interface InventoryGateway {
     }
 
     class ProtocolException extends RuntimeException {
+        public ProtocolException() {
+            super("Inventory returned an unexpected response");
+        }
+
         public ProtocolException(Throwable cause) {
             super("Inventory returned an unexpected response", cause);
         }
     }
 
     class ServiceUnavailableException extends RuntimeException {
+        public ServiceUnavailableException() {
+            super("Inventory is unavailable");
+        }
+
         public ServiceUnavailableException(Throwable cause) {
             super("Inventory is unavailable", cause);
         }

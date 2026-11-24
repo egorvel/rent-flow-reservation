@@ -1,5 +1,11 @@
 # Reservation observability implementation tasks
 
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+
 Status: Implemented on 2026-10-17 following the subsequent implementation request. Final acceptance is recorded in design.md §9.
 
 Each task is one safe commit in rent-flow-reservation and includes meaningful tests of its own
@@ -207,7 +213,8 @@ events and bounded test queues, building on each task's existing behavior covera
 - Real ECS diagnostics retain useful exception messages/causes/stacks, native span IDs and captured
   publication correlation after commit; handled unexpected HTTP errors mark server traces erroneous
   and keep generic public responses.
-- Sentinels in customer/order fields, bodies, headers/query values, credentials and bound SQL values
+- Sentinels in customer identity fixtures (verified token subjects or persisted owners), order/body
+  fields, headers/query values, credentials and bound SQL values
   stay absent from successful-path custom telemetry/captured attributes as specified; no test
   invents universal redaction of allowed paths, SQL literals or arbitrary exception messages.
 - Assert bounded metric labels, disabled baggage, management/probe exclusion and absence of new

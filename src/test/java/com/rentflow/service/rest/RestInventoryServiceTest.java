@@ -49,7 +49,8 @@ class RestInventoryServiceTest {
                 CircuitBreakerRegistry.ofDefaults(),
                 RetryRegistry.of(retryConfig),
                 new ObjectMapper(),
-                io.micrometer.observation.ObservationRegistry.NOOP);
+                io.micrometer.observation.ObservationRegistry.NOOP,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     }
 
     @Test
@@ -180,7 +181,8 @@ class RestInventoryServiceTest {
                 CircuitBreakerRegistry.ofDefaults(),
                 RetryRegistry.of(retryConfig),
                 new ObjectMapper(),
-                io.micrometer.observation.ObservationRegistry.NOOP);
+                io.micrometer.observation.ObservationRegistry.NOOP,
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     }
 
     private HttpClientErrorException clientError(HttpStatus status, String body) {

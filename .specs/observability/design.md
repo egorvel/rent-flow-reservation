@@ -1,5 +1,11 @@
 # Reservation observability design
 
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+
 Status: Implemented on 2026-10-17 following the subsequent implementation request; Common integration remains a separate handoff.
 
 ## 1. Scope, ownership and compatibility
@@ -449,8 +455,10 @@ servers may capture Inventory requests; actual cross-service propagation belongs
   A blocked relay cannot starve all monitoring or expiration. Disabled workers still expose
   backlog; caught send/delete/expiration failures yield error observations and no success update.
 - Serialize actual ECS callback logs, asserting native messages/causes/stacks and useful fields.
-  Use synthetic sentinels in customer/order inputs, body-only values, credentials, query/header
-  values and SQL parameters to prove successful-path custom diagnostics and capture exclusions.
+  Use synthetic customer subjects in authenticated JWT fixtures or persisted reservation fixtures,
+  and order/body-only values in valid requests, plus credential/query/header/SQL-parameter sentinels,
+  to prove successful-path custom diagnostics and capture exclusions. Do not supply customerId or
+  customerIssuer as valid creation/replacement inputs; both fields must be rejected.
   Do not assert universal redaction of accepted paths/SQL literals/arbitrary exception messages.
 - With OTLP enabled, exercise refused and slow HTTP collectors and bounded queue overflow using
   small test-only queue sizes; creation, cancellation commits, relay business state and readiness

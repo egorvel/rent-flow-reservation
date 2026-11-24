@@ -44,11 +44,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(ReservationNotFoundException.class)
     ResponseEntity<ProblemResponse> handleNotFound(ReservationNotFoundException exception, WebRequest request) {
-        return response(
-                ApiProblem.RESERVATION_NOT_FOUND,
-                "Reservation with ID '" + exception.getId() + "' was not found.",
-                request,
-                List.of());
+        return response(ApiProblem.RESERVATION_NOT_FOUND, request, List.of());
     }
 
     @ExceptionHandler(ServiceUnavailableException.class)
@@ -183,6 +179,9 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<ProblemResponse> handleUnexpected(Exception exception, WebRequest request) {
+        if (exception instanceof org.springframework.security.access.AccessDeniedException denied) {
+            throw denied;
+        }
         HttpServletRequest servletRequest = ((ServletWebRequest) request).getRequest();
         markError(exception, request);
         LOGGER.atError()

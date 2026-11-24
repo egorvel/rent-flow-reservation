@@ -82,8 +82,13 @@ class DurableCancellationTracingIT extends PostgresIntegrationTest {
                     .start();
             ReservationRepository reservations = first.getBean(ReservationRepository.class);
             LocalDate date = LocalDate.now(java.time.ZoneOffset.UTC).plusDays(1);
-            Reservation reservation = reservations.saveAndFlush(
-                    new Reservation("DURABLE-TRACE", "private-customer", "private-order", date, date));
+            Reservation reservation = reservations.saveAndFlush(new Reservation(
+                    "DURABLE-TRACE",
+                    "private-customer",
+                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                    "private-order",
+                    date,
+                    date));
             try (Tracer.SpanInScope ignored = tracer.withSpan(origin)) {
                 first.getBean(ReservationCancellationService.class).cancel(reservation.getId());
             } finally {
@@ -226,8 +231,13 @@ class DurableCancellationTracingIT extends PostgresIntegrationTest {
             Span origin =
                     tracer.spanBuilder().setNoParent().name("unsampled-origin").start();
             LocalDate date = LocalDate.now(java.time.ZoneOffset.UTC).plusDays(1);
-            Reservation saved =
-                    reservations.saveAndFlush(new Reservation("UNSAMPLED-TRACE", "customer", "order", date, date));
+            Reservation saved = reservations.saveAndFlush(new Reservation(
+                    "UNSAMPLED-TRACE",
+                    "customer",
+                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                    "order",
+                    date,
+                    date));
             try (Tracer.SpanInScope ignored = tracer.withSpan(origin)) {
                 assertThat(origin.context().sampled()).isFalse();
                 context.getBean(ReservationCancellationService.class).cancel(saved.getId());
@@ -291,10 +301,24 @@ class DurableCancellationTracingIT extends PostgresIntegrationTest {
     private ConfigurableApplicationContext start(String topic, String sampling) {
         return new SpringApplicationBuilder(ReservationApplication.class, Recording.class)
                 .web(WebApplicationType.NONE)
+                .profiles("test")
+                .initializers(context -> context.getEnvironment()
+                        .getPropertySources()
+                        .addFirst(new org.springframework.core.env.MapPropertySource(
+                                "isolated-security",
+                                java.util.Map.of(
+                                        "spring.datasource.password", RESERVATION_PASSWORD,
+                                        "spring.security.oauth2.resourceserver.jwt.issuer-uri",
+                                                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                                        "spring.security.oauth2.resourceserver.jwt.jwk-set-uri",
+                                                com.rentflow.support.SignedJwtFixture.SHARED.jwks(),
+                                        "spring.security.oauth2.client.provider.keycloak.token-uri",
+                                                com.rentflow.support.SignedJwtFixture.SHARED.tokenUri(),
+                                        "spring.security.oauth2.client.registration.inventory.client-secret",
+                                                "isolated-test-only"))))
                 .run(
                         "--spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                         "--spring.datasource.username=" + RESERVATION_USERNAME,
-                        "--spring.datasource.password=" + RESERVATION_PASSWORD,
                         "--spring.kafka.bootstrap-servers=" + KAFKA.getBootstrapServers(),
                         "--reservation.cancellation.topic=" + topic,
                         "--management.tracing.sampling.probability=" + sampling,

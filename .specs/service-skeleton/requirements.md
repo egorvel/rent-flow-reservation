@@ -1,5 +1,14 @@
 # Reservation Service Skeleton Requirements
 
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+Batch creation and hold metadata are defined by [creation](../reservation-creation/design.md)
+and [cancellation](../reservation-cancellation/design.md); they supersede the original single-item
+POST, Location header and date rules in the skeleton baseline.
+
 ## Context
 
 RentFlow needs a reservation service with basic CRUD and an executable engineering baseline.
@@ -20,9 +29,9 @@ Reservation tables, constraints, indexes, and schema-local Flyway history.
 As an internal consumer, I want to create, retrieve, replace, and delete reservations.
 
 - **AC1.1 (Event-driven):** When a valid creation request is submitted to `POST /api/v1/reservations`, the service shall persist a reservation with a generated UUID `id`, immutable UTC creation `timestamp`, and `HELD` status, and return `201` with its representation and canonical `Location`.
-- **AC1.2 (Event-driven):** When creation requests repeat a serial number or customer ID, the service shall accept them independently without uniqueness or external existence checks.
+- **AC1.2 (Event-driven):** When reservations share a customer identity, the service shall allow distinct reservation IDs for that owner without customer uniqueness or provider existence checks; active-item admission follows the creation specification.
 - **AC1.3 (Event-driven):** When an existing reservation is requested by ID, the service shall return `200` with `id`, `serialNumber`, `customerId`, `orderId`, `startDate`, `endDate`, `timestamp`, and `status`.
-- **AC1.4 (Event-driven):** When a valid full `PUT` replacement targets an existing reservation, the service shall replace the five client-assigned detail fields and status, preserve ID and timestamp, and return `200` with persisted values.
+- **AC1.4 (Event-driven):** When a valid full `PUT` replacement targets an existing reservation, the service shall replace serialNumber, orderId, startDate, endDate and status, preserve the original issuer/subject owner, ID and timestamp, and return `200` with persisted values.
 - **AC1.5 (Event-driven):** When an existing reservation is deleted, the service shall permanently delete it, return an empty `204`, and return `404` on subsequent retrieval.
 - **AC1.6 (Unwanted):** If an item GET, PUT, or DELETE targets a missing valid UUID, then the service shall return `404` without creating a reservation.
 
@@ -94,11 +103,11 @@ These initial decisions use the suggested defaults from the clarification questi
 subject to user steering during implementation.
 
 1. Reservation identity is an automatically generated UUID. See `design.md` §2.1.
-2. Customer/order IDs are opaque, nonblank strings of at most 64 characters. See `design.md` §2.1.
+2. Customer ID is the verified token subject, response-only and immutable, stored with its issuer as text; orderId remains client-supplied, nonblank and at most 64 characters. See `design.md` §2.1.
 3. Periods are inclusive calendar dates and may span one day or historical dates. See `design.md` §2.2.
 4. Timestamp is immutable server-generated UTC creation time. See `design.md` §2.1.
 5. Repeated serial/customer values are accepted; no uniqueness constraint or external check is added. See `design.md` §2.3.
 6. PUT requires any of HELD, CONFIRMED, or CANCELLED without transition restrictions. See `design.md` §3.3.
 7. DELETE is physical deletion; missing IDs return 404. See `design.md` §3.3.
-8. DTOs use `CreateReservationRequest` for POST and `ReservationDTO` for PUT and responses, preserving the existing input restrictions. See `design.md` §2.1 and §4.1.
+8. DTOs use the current batch `CreateReservationsRequest` for POST and `ReservationDTO` for PUT and responses, preserving the existing input restrictions. See `design.md` §2.1 and §4.1.
 9. String fields use Jackson's default number/boolean-to-string conversion without a custom mapper configuration; validation applies to the resulting values. See `design.md` §2.2.

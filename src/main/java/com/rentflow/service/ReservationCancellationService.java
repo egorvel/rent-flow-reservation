@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import com.rentflow.model.CustomerIdentity;
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCancellationOutbox;
 import com.rentflow.model.ReservationStatus;
@@ -34,6 +35,8 @@ public class ReservationCancellationService {
     private static final int EVENT_VERSION = 1;
 
     private final ReservationRepository reservations;
+    private final CustomerIdentityService identities;
+    private final ReservationAuthorizationPolicy policy;
     private final ReservationCancellationOutboxRepository outboxes;
     private final ObjectMapper mapper;
     private final int maxPayloadBytes;
@@ -46,7 +49,11 @@ public class ReservationCancellationService {
             ObjectMapper mapper,
             ReservationProperties properties,
             Tracer tracer,
-            Propagator propagator) {
+            Propagator propagator,
+            CustomerIdentityService identities,
+            ReservationAuthorizationPolicy policy) {
+        this.identities = identities;
+        this.policy = policy;
         this.reservations = reservations;
         this.outboxes = outboxes;
         this.mapper = mapper;
@@ -55,10 +62,14 @@ public class ReservationCancellationService {
         this.propagator = propagator;
     }
 
+    @org.springframework.security.access.prepost.PreAuthorize("@reservationAuthorizationPolicy.canCancel()")
     @Transactional
     public void cancel(UUID reservationId) {
-        Reservation reservation = reservations
-                .findForUpdateById(reservationId)
+        CustomerIdentity customer = policy.canCancelAny() ? null : identities.currentIdentity();
+        Reservation reservation = (customer == null
+                        ? reservations.findForUpdateById(reservationId)
+                        : reservations.findForUpdateByIdAndCustomerIssuerAndCustomerId(
+                                reservationId, customer.issuer(), customer.subject()))
                 .orElseThrow(() -> new ReservationNotFoundException(reservationId));
         if (reservation.getStatus() == ReservationStatus.CANCELLED) {
             return;

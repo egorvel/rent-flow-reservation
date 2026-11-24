@@ -114,7 +114,12 @@ class ReservationHoldExpirationIT extends PostgresIntegrationTest {
             futures.add(executor.submit(() -> {
                 ready.countDown();
                 start.await(5, TimeUnit.SECONDS);
-                cancellation.cancel(reservation.getId());
+                com.rentflow.support.SignedJwtFixture.authenticateStaff();
+                try {
+                    cancellation.cancel(reservation.getId());
+                } finally {
+                    org.springframework.security.core.context.SecurityContextHolder.clearContext();
+                }
                 return null;
             }));
             futures.add(executor.submit(() -> {
@@ -139,6 +144,7 @@ class ReservationHoldExpirationIT extends PostgresIntegrationTest {
         Reservation reservation = new Reservation(
                 serialNumber,
                 "CUSTOMER-001",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
                 "ORDER-001",
                 LocalDate.of(2026, 10, 1),
                 LocalDate.of(2026, 10, 3),

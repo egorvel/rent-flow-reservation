@@ -11,7 +11,7 @@ Reservation service. Owns time-based availability and temporary holds.
 **Reservation Entity**
 - Reservation ID – unique, auto-generated.
 - Serial Number – manually assigned.
-- Customer ID – manually assigned.
+- Customer ID – assigned from the verified authentication subject; ownership also stores the issuer.
 - Order ID – manually assigned, aggregates all reservations related to a single order.
 - Start Date.
 - End Date.

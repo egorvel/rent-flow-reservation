@@ -38,6 +38,10 @@ services:
       SPRING_DATASOURCE_USERNAME: ${RESERVATION_DB_USER:-reservation}
       SPRING_DATASOURCE_PASSWORD: ${RESERVATION_DB_PASSWORD:-reservation-local}
       INVENTORY_BASE_URL: http://inventory:8080
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: ${RESERVATION_ISSUER_URI:?Set RESERVATION_ISSUER_URI}
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: ${RESERVATION_JWKS_URI:?Set RESERVATION_JWKS_URI}
+      SPRING_SECURITY_OAUTH2_CLIENT_PROVIDER_KEYCLOAK_TOKEN_URI: ${RESERVATION_TOKEN_URI:?Set RESERVATION_TOKEN_URI}
       MANAGEMENT_SERVER_ADDRESS: 0.0.0.0
       MANAGEMENT_SERVER_PORT: ${MANAGEMENT_SERVER_PORT:-8087}
       TRACING_EXPORT_ENABLED: ${TRACING_EXPORT_ENABLED:-false}
@@ -45,6 +49,9 @@ services:
       OBSERVABILITY_ENVIRONMENT: ${OBSERVABILITY_ENVIRONMENT:-local}
       TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
       RESERVATION_KAFKA_CLUSTER_ID: ${RESERVATION_KAFKA_CLUSTER_ID:-}
+    secrets:
+      - source: reservation_oauth
+        target: spring.security.oauth2.client.registration.inventory.client-secret
     labels:
       rentflow.observability.collect: "true"
       rentflow.service: rent-flow-reservation
@@ -59,3 +66,7 @@ services:
 
 volumes:
   rentflow-postgres-data:
+
+secrets:
+  reservation_oauth:
+    file: ${RESERVATION_CLIENT_SECRET_FILE:?Set RESERVATION_CLIENT_SECRET_FILE to a protected credential file}

@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import com.rentflow.model.CustomerIdentity;
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCreationCommand;
 import com.rentflow.model.ReservationCreationOutcome;
@@ -25,6 +26,7 @@ import com.rentflow.model.ReservationCreationOutcome.Failure;
 import com.rentflow.model.ReservationCreationOutcome.Snapshot;
 import com.rentflow.model.ReservationCreationOutcome.Violation;
 import com.rentflow.model.ReservationCreationRequest;
+import com.rentflow.model.ReservationCreationRequestId;
 import com.rentflow.model.ReservationStatus;
 import com.rentflow.properties.ReservationProperties;
 import com.rentflow.repository.ReservationCreationRequestRepository;
@@ -55,6 +57,7 @@ public class ReservationCreationService {
     private final MeterRegistry metrics;
     private final ObservationRegistry observations;
     private final Duration holdDuration;
+    private final CustomerIdentityService identities;
 
     public ReservationCreationService(
             ReservationCreationRequestRepository creationRequests,
@@ -62,7 +65,9 @@ public class ReservationCreationService {
             InventoryGateway inventory,
             MeterRegistry metrics,
             ObservationRegistry observations,
-            ReservationProperties properties) {
+            ReservationProperties properties,
+            CustomerIdentityService identities) {
+        this.identities = identities;
         this.creationRequests = creationRequests;
         this.reservations = reservations;
         this.inventory = inventory;
@@ -71,13 +76,17 @@ public class ReservationCreationService {
         this.holdDuration = properties.cancellation().expiration().holdDuration();
     }
 
+    @org.springframework.security.access.prepost.PreAuthorize("@reservationAuthorizationPolicy.canCreate()")
     @Transactional
     public Result create(UUID key, ReservationCreationCommand command) {
+        CustomerIdentity customer = identities.currentIdentity();
+        ReservationCreationRequestId scopedKey = new ReservationCreationRequestId(
+                IdempotencyFingerprint.callerScope(customer.issuer(), customer.subject()), key);
         metrics.summary("reservation.creation.batch.size")
                 .record(command.items().size());
         Observation observation = Observation.start("reservation.creation", observations);
         try (Observation.Scope ignored = observation.openScope()) {
-            Result result = execute(key, command);
+            Result result = execute(scopedKey, command, customer);
             observation.lowCardinalityKeyValue("outcome", executionOutcome(result));
             observation.lowCardinalityKeyValue("replayed", Boolean.toString(result.replayed()));
             return result;
@@ -95,60 +104,84 @@ public class ReservationCreationService {
         }
     }
 
-    private Result execute(UUID key, ReservationCreationCommand command) {
+    private Result execute(
+            ReservationCreationRequestId key, ReservationCreationCommand command, CustomerIdentity customer) {
         String fingerprint = IdempotencyFingerprint.of(command);
-        if (!creationRequests.tryExecutionLock(IdempotencyFingerprint.lockId(key))) {
+        if (!creationRequests.tryExecutionLock(
+                IdempotencyFingerprint.lockId(key.callerScope(), key.idempotencyKey()))) {
             count("busy");
             return transientResult(ReservationCreationOutcomes.busy());
         }
 
         ReservationCreationRequest request =
-                creationRequests.findForUpdateByIdempotencyKey(key).orElse(null);
+                creationRequests.findForUpdateById(key).orElse(null);
         Instant databaseTime = creationRequests.databaseTime();
         if (request != null && request.getExpiresAt().isAfter(databaseTime)) {
+            if (!customer.subject().equals(request.getTargetCustomerId())) {
+                throw new org.springframework.security.access.AccessDeniedException("Operation not permitted");
+            }
             if (!request.getFingerprint().equals(fingerprint)) {
                 count("mismatch");
                 return transientResult(ReservationCreationOutcomes.keyReused());
+            }
+            if (request.getOutcome().status() == 201) {
+                List<UUID> ids = request.getOutcome().reservations().stream()
+                        .map(Snapshot::id)
+                        .toList();
+                if (reservations.countByIdInAndCustomerIssuerAndCustomerId(ids, customer.issuer(), customer.subject())
+                        != ids.size()) {
+                    throw new ReservationNotFoundException(ids.getFirst());
+                }
             }
             count("replay");
             return result(request.getOutcome(), request.getExpiresAt(), true);
         }
 
+        if (request == null) {
+            request = new ReservationCreationRequest(key);
+        }
         count("attempt");
         LocalDate currentDate = creationRequests.databaseUtcDate();
         List<Violation> violations = validate(command, currentDate);
         if (!violations.isEmpty()) {
-            return complete(key, fingerprint, request, ReservationCreationOutcomes.validation(violations));
+            return complete(
+                    key, fingerprint, request, ReservationCreationOutcomes.validation(violations), customer.subject());
         }
 
         List<Failure> conflicts = activeFailures(command, currentDate);
         if (!conflicts.isEmpty()) {
-            return complete(key, fingerprint, request, ReservationCreationOutcomes.active(conflicts));
+            return complete(
+                    key, fingerprint, request, ReservationCreationOutcomes.active(conflicts), customer.subject());
         }
 
-        ClaimResult inventoryResult = inventory.claim(key, serialNumbers(command));
+        ClaimResult inventoryResult = inventory.claim(
+                IdempotencyFingerprint.inventoryKey(key.callerScope(), key.idempotencyKey()), serialNumbers(command));
         return switch (inventoryResult.type()) {
-            case CLAIMED -> completeSuccess(key, fingerprint, request, command);
+            case CLAIMED -> completeSuccess(key, fingerprint, request, command, customer);
             case BUSY -> transientResult(ReservationCreationOutcomes.busy());
             case MISSING ->
                 complete(
                         key,
                         fingerprint,
                         request,
-                        ReservationCreationOutcomes.inventoryMissing(inventoryResult.failures()));
+                        ReservationCreationOutcomes.inventoryMissing(inventoryResult.failures()),
+                        customer.subject());
             case UNAVAILABLE ->
                 complete(
                         key,
                         fingerprint,
                         request,
-                        ReservationCreationOutcomes.inventoryUnavailable(inventoryResult.failures()));
+                        ReservationCreationOutcomes.inventoryUnavailable(inventoryResult.failures()),
+                        customer.subject());
             case INVALID_REFERENCE ->
                 complete(
                         key,
                         fingerprint,
                         request,
-                        ReservationCreationOutcomes.invalidInventoryReference(inventoryResult.failures()));
-            case KEY_REUSED -> complete(key, fingerprint, request, ReservationCreationOutcomes.keyReused());
+                        ReservationCreationOutcomes.invalidInventoryReference(inventoryResult.failures()),
+                        customer.subject());
+            case KEY_REUSED ->
+                complete(key, fingerprint, request, ReservationCreationOutcomes.keyReused(), customer.subject());
         };
     }
 
@@ -187,13 +220,18 @@ public class ReservationCreationService {
     }
 
     private Result completeSuccess(
-            UUID key, String fingerprint, ReservationCreationRequest request, ReservationCreationCommand command) {
+            ReservationCreationRequestId key,
+            String fingerprint,
+            ReservationCreationRequest request,
+            ReservationCreationCommand command,
+            CustomerIdentity customer) {
         Instant creationTime = creationRequests.databaseTime();
         Instant holdExpiresAt = creationTime.plus(holdDuration);
         List<Reservation> created = command.items().stream()
                 .map(item -> new Reservation(
                         item.serialNumber(),
-                        command.customerId(),
+                        customer.subject(),
+                        customer.issuer(),
                         command.orderId(),
                         item.startDate(),
                         item.endDate(),
@@ -213,13 +251,17 @@ public class ReservationCreationService {
                         reservation.getHoldExpiresAt(),
                         reservation.getStatus().name()))
                 .toList();
-        return complete(key, fingerprint, request, ReservationCreationOutcomes.success(snapshots));
+        return complete(key, fingerprint, request, ReservationCreationOutcomes.success(snapshots), customer.subject());
     }
 
     private Result complete(
-            UUID key, String fingerprint, ReservationCreationRequest request, ReservationCreationOutcome outcome) {
+            ReservationCreationRequestId key,
+            String fingerprint,
+            ReservationCreationRequest request,
+            ReservationCreationOutcome outcome,
+            String targetCustomer) {
         ReservationCreationRequest completed = request == null ? new ReservationCreationRequest(key) : request;
-        completed.complete(fingerprint, outcome, creationRequests.databaseTime());
+        completed.complete(fingerprint, outcome, creationRequests.databaseTime(), targetCustomer);
         creationRequests.saveAndFlush(completed);
         count("completion");
         String committedOutcome = terminalOutcome(outcome.code());

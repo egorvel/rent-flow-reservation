@@ -6,13 +6,13 @@ import com.rentflow.dto.CreateReservationsRequest;
 import com.rentflow.dto.ReservationDTO;
 import com.rentflow.model.Reservation;
 import com.rentflow.model.ReservationCreationCommand;
+import com.rentflow.model.ReservationReplacementCommand;
 import com.rentflow.model.ReservationStatus;
 
 @Component
 public class ReservationConverter {
     public ReservationCreationCommand toCommand(CreateReservationsRequest request) {
         return new ReservationCreationCommand(
-                request.customerId(),
                 request.orderId(),
                 request.items().stream()
                         .map(item -> new ReservationCreationCommand.Item(
@@ -20,15 +20,13 @@ public class ReservationConverter {
                         .toList());
     }
 
-    public Reservation toModel(ReservationDTO request) {
-        Reservation reservation = new Reservation(
+    public ReservationReplacementCommand toCommand(ReservationDTO request) {
+        return new ReservationReplacementCommand(
                 request.serialNumber(),
-                request.customerId(),
                 request.orderId(),
                 request.startDate(),
-                request.endDate());
-        reservation.changeStatus(ReservationStatus.valueOf(request.status()));
-        return reservation;
+                request.endDate(),
+                ReservationStatus.valueOf(request.status()));
     }
 
     public ReservationDTO toResponse(Reservation reservation) {

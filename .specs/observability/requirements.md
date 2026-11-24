@@ -1,5 +1,11 @@
 # Reservation observability requirements
 
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+
 Status: Implemented on 2026-10-17 following the implementation request; final acceptance is recorded in design.md §9.
 
 ## Context

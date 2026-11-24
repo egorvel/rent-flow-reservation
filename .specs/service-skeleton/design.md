@@ -1,5 +1,14 @@
 # Reservation Service Skeleton Design
 
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+Batch creation and hold metadata are defined by [creation](../reservation-creation/design.md)
+and [cancellation](../reservation-cancellation/design.md); they supersede the original single-item
+POST, Location header and date rules in the skeleton baseline.
+
 ## 1. Platform and architecture
 
 ### 1.1 Baseline
@@ -41,27 +50,33 @@ unit coverage verifies property validation without a Spring context.
 | --- | --- | --- | --- |
 | id | UUID | uuid primary key | JPA UUID generation; immutable; response only |
 | serialNumber | String | varchar(64) | Pattern `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` |
-| customerId | String | varchar(64) | Nonblank, client assigned, case sensitive; no lookup |
+| customerId | String | text | Verified token subject; nonblank, case sensitive, immutable, response only; no lookup |
+| — (internal customer_issuer) | String | text | Verified issuer; nonblank and immutable; combined with customerId for ownership |
 | orderId | String | varchar(64) | Nonblank, client assigned, case sensitive; may aggregate many reservations |
 | startDate | LocalDate | date | ISO YYYY-MM-DD, years 0001–9999 |
 | endDate | LocalDate | date | ISO YYYY-MM-DD, years 0001–9999, >= startDate |
 | timestamp | Instant | timestamptz(6) | Server UTC creation time, truncated to microseconds, immutable; response only |
 | status | ReservationStatus | varchar(16) | HELD, CONFIRMED, CANCELLED |
 
-Use `CreateReservationRequest` for POST and share `ReservationDTO` between PUT and responses.
-Creation remains separate because its status is server-assigned and its workflow will evolve
-independently. `ReservationDTO` validates all six mutable fields on PUT and includes all eight
-fields in responses. Its id and timestamp use Jackson read-only access and OpenAPI readOnly
-metadata. Enable FAIL_ON_IGNORED_PROPERTIES so supplying either managed field, including null,
-still returns 400 rather than silently ignoring it. No validation groups or additional DTOs
-are needed. The replacement contains the five manually assigned details and status. Creation
-contains only those five details; sending status, id or timestamp is a 400 unknown-property failure.
-The model assigns HELD and creation time during persistence. No public ID/timestamp mutator.
-UUIDs avoid a distributed sequence dependency; strings defer cross-service identifier semantics.
+Use the current batch `CreateReservationsRequest` for POST, as defined in the creation spec.
+It contains only orderId/items; the authorized service assigns the verified issuer/subject owner.
+Share `ReservationDTO` between PUT and responses. PUT validates exactly five mutable fields:
+serialNumber, orderId, startDate, endDate and status. The converter produces an internal
+ReservationReplacementCommand without owner fields; PUT preserves the original issuer/subject.
+
+Response customerId is read-only. ID, customerId and timestamp use Jackson read-only access and
+OpenAPI readOnly metadata; the cancellation spec also adds read-only holdExpiresAt. Enable
+FAIL_ON_IGNORED_PROPERTIES so supplying any managed field, including null, returns 400 rather
+than silently ignoring it. POST likewise rejects customerId/customerIssuer as unknown properties.
+No validation groups or client-supplied ownership are needed. The subject is an opaque string with
+no former 64-character business-ID limit or UUID parsing. orderId retains its 64-character limit.
+There is no owner reassignment, mapping table or provider lookup. Neither username/email nor a
+customerId claim or header establishes ownership. See security design §4 for the current contract.
 
 ### 2.2 Validation
 
-Bean validation enforces mandatory values, serial syntax, and 64-character limits. Controller
+Bean validation enforces mandatory writable values, serial syntax, and 64-character serial/order
+limits. Customer identity is extracted from verified authentication, not validated as a body field. Controller
 validation checks the period and years before service invocation, reports `endDate` for a
 reversed period, and accepts same-day and historical dates (AC3.1–AC3.2). No trimming or case
 normalization. OpenAPI declares the canonical string representation. Objects/arrays cannot
@@ -96,8 +111,9 @@ invalid mappings. These cover AC5.1–AC5.4.
 
 ### 3.1 Resource paths and creation
 
-All operations use `/api/v1/reservations`, JSON, and no credentials. POST accepts a valid
-CreateReservationRequest, persists once without external lookups, and returns 201 with
+The original skeleton used `/api/v1/reservations`, JSON, and no credentials; that initial POST
+contract below is superseded by the linked batch-creation and security specifications. POST accepts a valid
+original single-item creation request, persists once without external lookups, and returns 201 with
 ReservationDTO and relative `Location: /api/v1/reservations/{id}` (AC1.1–AC1.3).
 Creation status is always HELD. GET `/{id}` returns the persisted DTO or 404.
 
@@ -117,8 +133,8 @@ helpers retain the same `RequestValidationException` fields and messages.
 
 ### 3.3 Mutation
 
-PUT `/{id}` updates all five details plus status and returns 200 DTO. ID and creation timestamp
-remain unchanged. Status may be any enum value regardless of previous status; workflows are
+PUT `/{id}` updates serialNumber, orderId, startDate, endDate and status and returns 200 DTO.
+The original customer issuer/subject, ID, creation timestamp and hold deadline remain unchanged. Status may be any enum value regardless of previous status; workflows are
 deferred. Invalid replacement returns 400 without mutation. Missing ID returns 404 and never
 inserts. DELETE physically removes an existing entity, returns bodyless 204, and returns 404
 for missing IDs. PATCH is unsupported (AC1.4–AC1.6).
@@ -152,9 +168,9 @@ examples cover create, replace, response and errors. Generated-contract integrat
 operation paths/IDs, request and response properties, errors, parameters and UI accessibility
 (AC4.1–AC4.2).
 
-PUT and reservation responses reference the same `ReservationDTO` schema. Its id and timestamp
-are readOnly and required only in responses; the remaining six fields are required in both
-contexts. The schema example shows the complete response, while PUT supplies an explicit
+PUT and reservation responses reference the same `ReservationDTO` schema. Its id, customerId,
+timestamp and holdExpiresAt are readOnly and required only in responses; the five mutable fields
+are required in both contexts. The issuer is not exposed. The schema example shows the complete response, while PUT supplies an explicit
 request example without managed fields. Tests verify both examples, readOnly flags, required
 writable fields, and successful execution of the documented PUT example.
 

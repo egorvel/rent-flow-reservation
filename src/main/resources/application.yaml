@@ -1,4 +1,15 @@
 spring:
+  config:
+    import: optional:configtree:/run/secrets/
+  security:
+    oauth2:
+      client:
+        registration:
+          inventory:
+            provider: keycloak
+            client-id: reservation-service
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
   main:
     banner-mode: "off"
   application:
@@ -30,6 +41,7 @@ spring:
     serviceclient:
       inventory:
         base-url: ${INVENTORY_BASE_URL:http://inventory}
+        redirects: dont-follow
         connect-timeout: 500ms
         read-timeout: 1500ms
   kafka:
@@ -50,6 +62,10 @@ spring:
         max.block.ms: 5000
 
 springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
   paths-to-match: /api/v1/**
 
 management:
@@ -126,6 +142,7 @@ management:
         readiness:
           include: readinessState,db
       show-details: never
+      show-components: never
 
 logging:
   level:
@@ -173,6 +190,7 @@ resilience4j:
         ignore-exceptions:
           - org.springframework.web.client.HttpClientErrorException
           - com.rentflow.service.rest.UnexpectedInventoryResponseException
+          - org.springframework.security.oauth2.core.OAuth2AuthorizationException
   retry:
     instances:
       inventory:

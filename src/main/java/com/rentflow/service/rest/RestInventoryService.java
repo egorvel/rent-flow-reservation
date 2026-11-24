@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.oauth2.core.OAuth2AuthorizationException;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
@@ -26,6 +27,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import tools.jackson.databind.ObjectMapper;
@@ -48,13 +50,16 @@ public class RestInventoryService implements InventoryGateway {
     private final Retry retry;
     private final ObjectMapper objectMapper;
     private final ObservationRegistry observations;
+    private final MeterRegistry metrics;
 
     public RestInventoryService(
             InventoryHttpClient inventoryClient,
             CircuitBreakerRegistry circuitBreakerRegistry,
             RetryRegistry retryRegistry,
             ObjectMapper objectMapper,
-            ObservationRegistry observations) {
+            ObservationRegistry observations,
+            MeterRegistry metrics) {
+        this.metrics = metrics;
         this.inventoryClient = inventoryClient;
         this.circuitBreaker = circuitBreakerRegistry.circuitBreaker("inventory");
         this.retry = retryRegistry.retry("inventory");
@@ -107,6 +112,24 @@ public class RestInventoryService implements InventoryGateway {
             try {
                 result = guardedCall.get();
             } catch (HttpClientErrorException exception) {
+                if (exception.getStatusCode().value() == 401
+                        || exception.getStatusCode().value() == 403) {
+                    String reason = exception.getStatusCode().value() == 401
+                            ? "upstream_unauthenticated"
+                            : "upstream_forbidden";
+                    metrics.counter(
+                                    "reservation.security.outbound.failures",
+                                    "dependency",
+                                    "inventory",
+                                    "reason",
+                                    reason)
+                            .increment();
+                    LOGGER.atWarn()
+                            .addKeyValue("dependency", "inventory")
+                            .addKeyValue("reason", reason)
+                            .log("Inventory access rejected");
+                    throw new ProtocolException();
+                }
                 result = decodeClientError(exception, serialNumbers);
             }
             observation.lowCardinalityKeyValue(
@@ -120,6 +143,14 @@ public class RestInventoryService implements InventoryGateway {
                         case KEY_REUSED -> "key_reused";
                     });
             return result;
+        } catch (OAuth2AuthorizationException exception) {
+            boolean unavailable =
+                    "token_unavailable".equals(exception.getError().getErrorCode());
+            RuntimeException safe = unavailable ? new ServiceUnavailableException() : new ProtocolException();
+            observation
+                    .lowCardinalityKeyValue("outcome", unavailable ? "unavailable" : "protocol_error")
+                    .error(safe);
+            throw safe;
         } catch (CallNotPermittedException exception) {
             failure(observation, "short_circuited", exception, false);
             throw new ServiceUnavailableException(exception);
@@ -130,7 +161,9 @@ public class RestInventoryService implements InventoryGateway {
             failure(observation, "protocol_error", exception, true);
             throw new ProtocolException(exception);
         } catch (ProtocolException exception) {
-            failure(observation, "protocol_error", exception, true);
+            // Authentication failures already emitted their bounded reason category above.
+            // Their cause-free public exception must not produce a second stack-trace diagnostic.
+            failure(observation, "protocol_error", exception, exception.getCause() != null);
             throw exception;
         } catch (RuntimeException | Error exception) {
             failure(observation, "error", exception, true);
@@ -166,7 +199,8 @@ public class RestInventoryService implements InventoryGateway {
         try {
             problem = objectMapper.readValue(exception.getResponseBodyAsByteArray(), InventoryProblem.class);
         } catch (RuntimeException exceptionDuringDecoding) {
-            throw new ProtocolException(new UnexpectedInventoryResponseException(exceptionDuringDecoding));
+            throw new ProtocolException(
+                    new UnexpectedInventoryResponseException(org.springframework.http.HttpStatus.BAD_GATEWAY));
         }
 
         int status = exception.getStatusCode().value();

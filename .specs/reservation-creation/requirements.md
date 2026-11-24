@@ -1,10 +1,18 @@
 # Reservation Creation Requirements
 
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+
 Status: Requirements resolved for the synchronous terminal-ledger design.
 
 ## Context
 
-The reservation service creates an atomic batch of `HELD` reservations for one customer and order.
+The reservation service creates an atomic batch of `HELD` reservations for the authenticated
+issuer/subject owner and a client-supplied order. POST accepts only `orderId` and `items`;
+`customerId` is assigned from verified `sub`, stored with verified `iss`, and returned read-only.
 Each item supplies a case-sensitive Inventory serial number and its own inclusive start and end
 dates. PostgreSQL is the authority for the current UTC date and persisted timestamps.
 
@@ -19,7 +27,8 @@ concurrency authority for competing reservation requests. Reservation creates it
 Inventory returns its exact success response.
 
 The endpoint requires a UUID v4 `Idempotency-Key`. Reservation uses the same compact terminal-ledger
-pattern as Inventory: a transaction-scoped advisory lock serializes one key, and a single table
+pattern as Inventory: a transaction-scoped advisory lock serializes one authenticated caller/key,
+and a single table
 stores the request fingerprint, terminal HTTP status, complete response snapshot, database
 completion time, and seven-day expiry. Matching retries load the response from this table. There
 are no processing states, leases, persisted payloads, durable retry queues, recovery workers, or
@@ -40,10 +49,13 @@ batch succeeds or fails as one operation.
   an active local reservation, Inventory reserves every item, and local persistence commits, the
   reservation service shall return `201 Created` with every created reservation in request order.
 - **AC1.2 (Ubiquitous):** The reservation service shall create each item with a generated UUID,
-  PostgreSQL-generated timestamp, `HELD` status, the common `customerId` and `orderId`, and the
+  PostgreSQL-generated timestamp, `HELD` status, the authenticated subject as `customerId`, its
+  verified issuer, the common client-supplied `orderId`, and the
   item's `serialNumber`, `startDate`, and `endDate`.
-- **AC1.3 (Ubiquitous):** The reservation service shall require nonblank `customerId` and `orderId`
-  values of at most 64 characters and an `items` array containing 1–100 non-null objects.
+- **AC1.3 (Ubiquitous):** The reservation service shall require a nonblank `orderId` of at most 64
+  characters and an `items` array containing 1–100 non-null objects, reject request owner fields
+  with `400`, and obtain ownership only from verified authentication without the former 64-character
+  business-ID limit on the subject.
 - **AC1.4 (Ubiquitous):** The reservation service shall require every item to contain a
   `serialNumber`, `startDate`, and `endDate`, and shall reject duplicate case-sensitive serial
   numbers within a batch.
@@ -51,7 +63,8 @@ batch succeeds or fails as one operation.
   every end date is on or after its start date, the reservation service shall accept the periods,
   including same-day periods.
 - **AC1.6 (Unwanted):** If the request is invalid, then the reservation service shall return `400`
-  with field violations, create no reservation, and make no Inventory request.
+  with safe Problem Details and field violations where applicable, create no reservation, and make
+  no Inventory request.
 - **AC1.7 (Ubiquitous):** The reservation service shall persist either every reservation and its
   successful ledger outcome in one local transaction or none of them.
 - **AC1.8 (Ubiquitous):** The reservation service shall not return partial success or a `Location`
@@ -85,7 +98,7 @@ response describes the completed synchronous attempt.
 
 - **AC3.1 (Event-driven):** When local admission succeeds, the reservation service shall send one
   atomic Inventory batch requesting `RESERVED` for every serial number in request order and shall
-  forward the public idempotency key unchanged.
+  use the deterministic issuer/subject-scoped downstream UUID defined in security design §5.1.
 - **AC3.2 (Ubiquitous):** The reservation service shall treat only Inventory's exact `204 No
   Content` response as authorization to create reservations.
 - **AC3.3 (Unwanted):** If Inventory reports missing items, then the reservation service shall
@@ -114,19 +127,21 @@ response describes the completed synchronous attempt.
 ### US4 — Replay terminal outcomes
 
 As an API consumer, I want terminal responses retained under an idempotency key so that retries do
-not repeat completed business work.
+not repeat completed business work within their authenticated issuer/subject scope.
 
 - **AC4.1 (Unwanted):** If the request lacks exactly one canonical UUID v4 `Idempotency-Key`, then
   the reservation service shall return `400 VALIDATION_FAILED`, write no ledger row, and make no
   Inventory request.
 - **AC4.2 (Event-driven):** When a new or expired key reaches command-level validation, the
   reservation service shall calculate a SHA-256 fingerprint from the validated common and ordered
-  item fields and attempt execution under a transaction-scoped advisory lock derived from the key.
+  item fields, excluding customer identity, and attempt execution under a transaction-scoped advisory
+  lock derived from the authenticated caller scope and external key.
 - **AC4.3 (Event-driven):** When a new attempt produces a terminal `201`, `400`, `409`, or `422`
   outcome, the reservation service shall atomically store its fingerprint, HTTP status, complete
   response snapshot, PostgreSQL completion timestamp, and expiry exactly seven days later.
-- **AC4.4 (Event-driven):** When an unexpired key is retried with the same fingerprint, the
-  reservation service shall load and replay the stored status and body without validation against
+- **AC4.4 (Event-driven):** When an authorized caller retries an unexpired key in its issuer/subject scope
+  with the same fingerprint and retains ownership of all successful snapshot rows, the reservation
+  service shall load and replay the stored status and body without validation against
   the current date, a local availability query, an Inventory call, or new reservation writes.
 - **AC4.5 (Unwanted):** If an unexpired key is reused with a different fingerprint, then the
   reservation service shall return `422 IDEMPOTENCY_KEY_REUSED` without changing the ledger,
@@ -182,7 +197,7 @@ used and diagnosed correctly.
 
 - Reservation replacement, cancellation, deletion, rental, return, and Inventory release.
 - Background retry, durable recovery, compensation, and automatic reconciliation.
-- Authentication and authorization.
+- Authentication/authorization policy changes; the existing security contract applies to every call.
 - Changes to Inventory's transition API, status model, or owned database objects.
 - Persisting malformed JSON, missing-header errors, or framework-level request-binding failures in
   the terminal ledger because no canonical business command exists for fingerprinting.
@@ -199,5 +214,12 @@ used and diagnosed correctly.
 5. **Retries.** Retain five foreground attempts with exponential jittered waits. See `design.md`
    §5.
 6. **Cleanup.** Retain bounded daily cleanup and the fields needed for expiry. See `design.md` §6.
-7. **Migration strategy.** Replace the unshipped reservation-creation migration rather than add a
-   compatibility migration. See `design.md` §4.1 and `tasks.md` T1.
+7. **Migration strategy.** Retain V2's completed terminal-ledger baseline and shipped V1–V5;
+   consolidated security V6 supplies the current identity/scoped-key cutover without a compatibility
+   path or mapping table. See `design.md` §4.1 and `tasks.md` T1.
+
+8. **Customer identity.** Ownership is assigned from verified issuer/subject without an input
+   customer ID or mapping; responses retain read-only customerId. See `design.md` §2.1 and §2.2.
+9. **Authenticated idempotency.** Payload fingerprints omit identity; issuer/subject-scoped keys,
+   locks, downstream UUIDs and current replay authorization retain the owner relationship. See
+   `design.md` §3.1, §3.2 and §4.2; security design §5.1 defines the exact tuple encoding.

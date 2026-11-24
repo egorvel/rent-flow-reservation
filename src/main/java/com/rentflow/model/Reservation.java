@@ -25,8 +25,11 @@ public class Reservation {
     @Column(name = "serial_number", nullable = false, length = 64)
     private String serialNumber;
 
-    @Column(name = "customer_id", nullable = false, length = 64)
+    @Column(name = "customer_id", nullable = false, updatable = false, columnDefinition = "text")
     private String customerId;
+
+    @Column(name = "customer_issuer", nullable = false, updatable = false, columnDefinition = "text")
+    private String customerIssuer;
 
     @Column(name = "order_id", nullable = false, length = 64)
     private String orderId;
@@ -49,10 +52,17 @@ public class Reservation {
 
     protected Reservation() {}
 
-    public Reservation(String serialNumber, String customerId, String orderId, LocalDate startDate, LocalDate endDate) {
+    public Reservation(
+            String serialNumber,
+            String customerId,
+            String customerIssuer,
+            String orderId,
+            LocalDate startDate,
+            LocalDate endDate) {
         this(
                 serialNumber,
                 customerId,
+                customerIssuer,
                 orderId,
                 startDate,
                 endDate,
@@ -62,16 +72,26 @@ public class Reservation {
     private Reservation(
             String serialNumber,
             String customerId,
+            String customerIssuer,
             String orderId,
             LocalDate startDate,
             LocalDate endDate,
             Instant timestamp) {
-        this(serialNumber, customerId, orderId, startDate, endDate, timestamp, timestamp.plusSeconds(600));
+        this(
+                serialNumber,
+                customerId,
+                customerIssuer,
+                orderId,
+                startDate,
+                endDate,
+                timestamp,
+                timestamp.plusSeconds(600));
     }
 
     public Reservation(
             String serialNumber,
             String customerId,
+            String customerIssuer,
             String orderId,
             LocalDate startDate,
             LocalDate endDate,
@@ -79,6 +99,7 @@ public class Reservation {
             Instant holdExpiresAt) {
         this.serialNumber = Objects.requireNonNull(serialNumber);
         this.customerId = Objects.requireNonNull(customerId);
+        this.customerIssuer = Objects.requireNonNull(customerIssuer);
         this.orderId = Objects.requireNonNull(orderId);
         this.startDate = Objects.requireNonNull(startDate);
         this.endDate = Objects.requireNonNull(endDate);
@@ -96,6 +117,10 @@ public class Reservation {
 
     public String getCustomerId() {
         return customerId;
+    }
+
+    public String getCustomerIssuer() {
+        return customerIssuer;
     }
 
     public String getOrderId() {
@@ -126,12 +151,11 @@ public class Reservation {
         this.status = Objects.requireNonNull(status);
     }
 
-    public void replaceDetails(Reservation replacement) {
-        serialNumber = replacement.serialNumber;
-        customerId = replacement.customerId;
-        orderId = replacement.orderId;
-        startDate = replacement.startDate;
-        endDate = replacement.endDate;
-        status = replacement.status;
+    public void replaceDetails(ReservationReplacementCommand replacement) {
+        serialNumber = replacement.serialNumber();
+        orderId = replacement.orderId();
+        startDate = replacement.startDate();
+        endDate = replacement.endDate();
+        status = replacement.status();
     }
 }

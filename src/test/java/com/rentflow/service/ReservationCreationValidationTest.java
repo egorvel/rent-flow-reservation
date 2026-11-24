@@ -18,7 +18,6 @@ class ReservationCreationValidationTest {
     @Test
     void reportsEveryLaterExactDuplicateAndReversedPeriod() {
         ReservationCreationCommand command = new ReservationCreationCommand(
-                "customer",
                 "order",
                 List.of(
                         item("Serial", TODAY, TODAY),
@@ -36,7 +35,7 @@ class ReservationCreationValidationTest {
     @Test
     void validatesStartAgainstSuppliedDatabaseDate() {
         ReservationCreationCommand command = new ReservationCreationCommand(
-                "customer", "order", List.of(item("past", TODAY.minusDays(1), TODAY), item("today", TODAY, TODAY)));
+                "order", List.of(item("past", TODAY.minusDays(1), TODAY), item("today", TODAY, TODAY)));
 
         assertThat(ReservationCreationValidation.againstAcceptedDate(command, TODAY))
                 .containsExactly(new Violation("items[0].startDate", "must be on or after the current UTC date"));
@@ -57,11 +56,11 @@ class ReservationCreationValidationTest {
     @Test
     void fingerprintsSemanticContentAndOrder() {
         ReservationCreationCommand first = new ReservationCreationCommand(
-                "customer", "order", List.of(item("A", TODAY, TODAY), item("B", TODAY, TODAY.plusDays(1))));
+                "order", List.of(item("A", TODAY, TODAY), item("B", TODAY, TODAY.plusDays(1))));
         ReservationCreationCommand same = new ReservationCreationCommand(
-                "customer", "order", List.of(item("A", TODAY, TODAY), item("B", TODAY, TODAY.plusDays(1))));
+                "order", List.of(item("A", TODAY, TODAY), item("B", TODAY, TODAY.plusDays(1))));
         ReservationCreationCommand reordered = new ReservationCreationCommand(
-                "customer", "order", List.of(item("B", TODAY, TODAY.plusDays(1)), item("A", TODAY, TODAY)));
+                "order", List.of(item("B", TODAY, TODAY.plusDays(1)), item("A", TODAY, TODAY)));
 
         assertThat(IdempotencyFingerprint.of(first))
                 .isEqualTo(IdempotencyFingerprint.of(same))

@@ -8,6 +8,8 @@ import java.util.Optional;
 import java.util.UUID;
 import jakarta.persistence.LockModeType;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -17,6 +19,16 @@ import com.rentflow.model.ReservationBacklog;
 import com.rentflow.model.ReservationStatus;
 
 public interface ReservationRepository extends JpaRepository<Reservation, UUID> {
+    Optional<Reservation> findByIdAndCustomerIssuerAndCustomerId(UUID id, String customerIssuer, String customerId);
+
+    Page<Reservation> findAllByCustomerIssuerAndCustomerId(String customerIssuer, String customerId, Pageable pageable);
+
+    long countByIdInAndCustomerIssuerAndCustomerId(Collection<UUID> ids, String customerIssuer, String customerId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<Reservation> findForUpdateByIdAndCustomerIssuerAndCustomerId(
+            UUID id, String customerIssuer, String customerId);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<Reservation> findForUpdateById(UUID id);
 

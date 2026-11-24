@@ -29,6 +29,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ReservationCancellationServiceTest {
+    @org.junit.jupiter.api.BeforeEach
+    void authenticate() {
+        com.rentflow.support.SignedJwtFixture.authenticateStaff();
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void clear() {
+        org.springframework.security.core.context.SecurityContextHolder.clearContext();
+    }
+
     private static final Instant DATABASE_TIME = Instant.parse("2026-09-21T15:30:00Z");
 
     private ReservationRepository reservations;
@@ -47,7 +57,9 @@ class ReservationCancellationServiceTest {
                 mapper,
                 ReservationPropertiesFixture.defaults(),
                 io.micrometer.tracing.Tracer.NOOP,
-                io.micrometer.tracing.propagation.Propagator.NOOP);
+                io.micrometer.tracing.propagation.Propagator.NOOP,
+                org.mockito.Mockito.mock(CustomerIdentityService.class),
+                new com.rentflow.service.ReservationAuthorizationPolicy());
         when(outboxes.databaseTime()).thenReturn(DATABASE_TIME);
     }
 
@@ -104,7 +116,14 @@ class ReservationCancellationServiceTest {
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.any());
         ReservationCancellationService observed = new ReservationCancellationService(
-                reservations, outboxes, mapper, ReservationPropertiesFixture.defaults(), tracer, propagator);
+                reservations,
+                outboxes,
+                mapper,
+                ReservationPropertiesFixture.defaults(),
+                tracer,
+                propagator,
+                org.mockito.Mockito.mock(CustomerIdentityService.class),
+                new com.rentflow.service.ReservationAuthorizationPolicy());
         UUID id = UUID.randomUUID();
         Reservation reservation = reservation(ReservationStatus.HELD);
         when(reservations.findForUpdateById(id)).thenReturn(Optional.of(reservation));
@@ -151,7 +170,9 @@ class ReservationCancellationServiceTest {
                 mapper,
                 ReservationPropertiesFixture.withMaxPayloadBytes(32),
                 io.micrometer.tracing.Tracer.NOOP,
-                io.micrometer.tracing.propagation.Propagator.NOOP);
+                io.micrometer.tracing.propagation.Propagator.NOOP,
+                org.mockito.Mockito.mock(CustomerIdentityService.class),
+                new com.rentflow.service.ReservationAuthorizationPolicy());
 
         assertThatThrownBy(() -> service.cancel(reservationId))
                 .isInstanceOf(IllegalStateException.class)
@@ -205,7 +226,12 @@ class ReservationCancellationServiceTest {
 
     private Reservation reservation(ReservationStatus status) {
         Reservation reservation = new Reservation(
-                "Drill-001", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 2));
+                "Drill-001",
+                "CUSTOMER-001",
+                "https://issuer.example",
+                "ORDER-001",
+                LocalDate.of(2026, 10, 1),
+                LocalDate.of(2026, 10, 2));
         reservation.changeStatus(status);
         return reservation;
     }

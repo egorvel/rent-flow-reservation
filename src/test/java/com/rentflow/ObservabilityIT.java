@@ -92,10 +92,10 @@ class ObservabilityIT extends PostgresIntegrationTest {
     @Test
     void isolatesManagementAndPreservesProbesIdentityAndMeters() throws Exception {
         for (String path : List.of("/actuator/prometheus", "/actuator/health", "/actuator/env")) {
-            assertThat(get("local.server.port", path, null).statusCode()).isEqualTo(404);
+            assertThat(get("local.server.port", path, null).statusCode()).isEqualTo(403);
         }
         for (String path : List.of("/actuator/env", "/actuator/metrics", "/actuator/configprops")) {
-            assertThat(get("local.management.port", path, null).statusCode()).isEqualTo(404);
+            assertThat(get("local.management.port", path, null).statusCode()).isEqualTo(403);
         }
         for (String path : List.of("/livez", "/readyz")) {
             assertThat(get("local.server.port", path, null).body()).isEqualTo("{\"status\":\"UP\"}");
@@ -130,7 +130,16 @@ class ObservabilityIT extends PostgresIntegrationTest {
         get("local.management.port", "/actuator/prometheus", null);
         get("local.management.port", "/actuator/health", null);
         get("local.server.port", "/actuator-business", null);
-        flushSpans();
+        // The client can receive the body before the server observation has stopped. Flushing
+        // only drains spans already ended; await completion within the existing five-second bound.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        do {
+            flushSpans();
+            if (SPANS.getFinishedSpanItems().stream().anyMatch(span -> span.getKind() == SpanKind.SERVER)) {
+                break;
+            }
+            Thread.sleep(10);
+        } while (System.nanoTime() < deadline);
         assertThat(SPANS.getFinishedSpanItems())
                 .filteredOn(span -> span.getKind() == SpanKind.SERVER)
                 .singleElement()
@@ -144,8 +153,13 @@ class ObservabilityIT extends PostgresIntegrationTest {
     @Test
     void correlatesJdbcWithoutCapturingRequestInputsOrBoundParameters() throws Exception {
         LocalDate date = LocalDate.now(ZoneOffset.UTC).plusDays(1);
-        Reservation saved = reservations.saveAndFlush(
-                new Reservation("TRACE-JDBC", "private-customer", "private-order", date, date));
+        Reservation saved = reservations.saveAndFlush(new Reservation(
+                "TRACE-JDBC",
+                "private-customer",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                "private-order",
+                date,
+                date));
         flushSpans();
         SPANS.reset();
         String traceId = "11111111111111111111111111111111";
@@ -253,8 +267,13 @@ class ObservabilityIT extends PostgresIntegrationTest {
     @Test
     void cancellationPersistsOriginAndLogsOnlyCommittedTransitionsWithEcsDiagnostics() {
         LocalDate date = LocalDate.now(ZoneOffset.UTC).plusDays(1);
-        Reservation saved = reservations.saveAndFlush(
-                new Reservation("TRACE-CANCEL", "private-customer", "private-order", date, date));
+        Reservation saved = reservations.saveAndFlush(new Reservation(
+                "TRACE-CANCEL",
+                "private-customer",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                "private-order",
+                date,
+                date));
         io.micrometer.tracing.Span origin =
                 tracer.spanBuilder().setNoParent().name("cancellation-origin").start();
         try (EcsLogCapture logs = new EcsLogCapture("com.rentflow.service.ReservationCancellationService");
@@ -279,8 +298,13 @@ class ObservabilityIT extends PostgresIntegrationTest {
         } finally {
             origin.end();
         }
-        Reservation rolledBack = reservations.saveAndFlush(
-                new Reservation("TRACE-CANCEL-ROLLBACK", "private-customer", "private-order", date, date));
+        Reservation rolledBack = reservations.saveAndFlush(new Reservation(
+                "TRACE-CANCEL-ROLLBACK",
+                "private-customer",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                "private-order",
+                date,
+                date));
         try (EcsLogCapture logs = new EcsLogCapture("com.rentflow.service.ReservationCancellationService")) {
             new org.springframework.transaction.support.TransactionTemplate(transactions)
                     .executeWithoutResult(status -> {
@@ -296,7 +320,7 @@ class ObservabilityIT extends PostgresIntegrationTest {
     private ReservationCreationCommand command(String serial) {
         LocalDate date = LocalDate.now(ZoneOffset.UTC).plusDays(1);
         return new ReservationCreationCommand(
-                "private-customer", "private-order", List.of(new ReservationCreationCommand.Item(serial, date, date)));
+                "private-order", List.of(new ReservationCreationCommand.Item(serial, date, date)));
     }
 
     private double committedCount() {
@@ -309,7 +333,7 @@ class ObservabilityIT extends PostgresIntegrationTest {
         int port = environment.getRequiredProperty(portProperty, Integer.class);
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .timeout(Duration.ofSeconds(5))
-                .header("Authorization", "Bearer private-header")
+                .header("Authorization", "Bearer " + com.rentflow.support.SignedJwtFixture.SHARED.staff())
                 .header("baggage", "secret=private-baggage")
                 .GET();
         if (context != null && !context.isEmpty()) {

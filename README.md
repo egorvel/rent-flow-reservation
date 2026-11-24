@@ -12,7 +12,8 @@ The implementation follows the sibling Pricing service's MVC layers, DTO/convert
 Problem Details errors, page envelope, build checks, and schema ownership conventions.
 The sources of truth are [the service-skeleton spec](.specs/service-skeleton/requirements.md),
 [the reservation-creation spec](.specs/reservation-creation/requirements.md),
-and [the reservation-cancellation spec](.specs/reservation-cancellation/requirements.md).
+[the reservation-cancellation spec](.specs/reservation-cancellation/requirements.md),
+and [the security spec](.specs/security/requirements.md).
 
 ## Platform
 
@@ -24,9 +25,13 @@ verifies its distribution checksum.
 Local prerequisites: JDK 25 and Docker with Compose v2. Maven 3.9 is needed for the bare `mvn`
 command; `./mvnw` works without a system Maven installation. The wrapper downloads its pinned
 distribution and may require `curl`/`wget` and `unzip`. The container smoke script also requires
-Bash, `curl`, and `jq`.
+Bash, `curl`, `jq`, and `setfacl` (the `acl` package).
 
 ## Run the local stack
+
+Configure the issuer and the protected recipient credential as described in **Security setup**
+below before running Compose. Common must provision the Reservation human grants before real
+customer/staff login can authorize calls; its separate C1 handoff remains pending.
 
 ```bash
 docker compose up --build --detach --wait
@@ -126,11 +131,11 @@ startup if the datasource, required schema, Flyway migration, or Hibernate valid
 
 ## Reservation contract
 
-The API is unauthenticated in this increment and accepts JSON. It returns a generated UUID `id`,
-client-assigned `serialNumber`, `customerId`, `orderId`, inclusive `startDate`/`endDate`, immutable
+The API requires an approved human bearer token and accepts JSON. It returns a generated UUID `id`,
+client-assigned `serialNumber`/`orderId`, token-derived read-only `customerId`, inclusive `startDate`/`endDate`, immutable
 UTC creation `timestamp` and `holdExpiresAt` deadline (microsecond precision), and `status`.
 
-Customer/order IDs are case-sensitive, nonblank strings up to 64 characters. Creation delegates
+Order IDs are case-sensitive, nonblank strings up to 64 characters. Customer IDs are opaque verified token subjects; ownership also compares the persisted issuer. Creation delegates
 serial-number validity and existence to Inventory. Dates use `YYYY-MM-DD`, years 0001–9999, with
 `endDate >= startDate`; same-day periods are accepted and new intents must start on or after the
 current PostgreSQL UTC date. An item has an active local reservation when a `HELD` or `CONFIRMED`
@@ -145,16 +150,16 @@ row ends today or later. Outdated and `CANCELLED` rows do not block creation.
 | POST | /api/v1/reservations/{id}/cancel | 204 local cancellation committed or already cancelled |
 | DELETE | /api/v1/reservations/{id} | 204 permanent deletion |
 
-PUT requires all five client-assigned detail fields plus `status` (`HELD`, `CONFIRMED`, or
-`CANCELLED`). It preserves ID, timestamp, and `holdExpiresAt` and never inserts a missing
+PUT requires the four client-assigned detail fields plus `status` (`HELD`, `CONFIRMED`, or
+`CANCELLED`). It preserves the original owner, ID, timestamp, and `holdExpiresAt` and never inserts a missing
 reservation. There are no status-transition restrictions yet. POST requires a canonical UUID-v4 `Idempotency-Key` and an
-envelope containing common `customerId`/`orderId` plus 1–100 unique item serials and periods. It
-returns no `Location` header. Unknown properties are rejected. Missing item GET/PUT/DELETE returns
+envelope containing common `orderId` plus 1–100 unique item serials and periods. It
+returns no `Location` header. Unknown properties and supplied owner fields are rejected. Missing item GET/PUT/DELETE returns
 404. PATCH is unsupported.
 
 Errors use `application/problem+json` with `type`, `title`, `status`, `detail`, `instance`, and
 machine-readable `code`; validation errors add `violations` sorted by field and message.
-Invalid requests return 400, unsupported methods 405, unacceptable response media 406, unsupported
+Invalid requests return 400, forbidden methods 401/403, unacceptable response media 406, unsupported
 request media 415, and unexpected failures a sanitized 500. Swagger describes schemas and examples.
 
 ### Cancellation and Inventory release
@@ -225,38 +230,41 @@ payload dumps and deliberately captured customer/order data are excluded. See Ob
 
 ## Try every operation
 
-These examples use the local stack and `jq` to capture the first generated ID:
+These examples require a staff token from the approved PKCE client and `jq` to capture the first
+ID. Set `RENTFLOW_CURL_CONFIG` to a protected curl config containing the Authorization header;
+use the private-input procedure below. No token is placed in curl arguments. Use future dates
+appropriate to the current PostgreSQL UTC date.
 
 ```bash
 BASE_URL=http://localhost:8082
 IDEMPOTENCY_KEY=$(cat /proc/sys/kernel/random/uuid)
-CREATED=$(curl --fail-with-body --silent --show-error \
+CREATED=$(curl --config "$RENTFLOW_CURL_CONFIG" --fail-with-body --silent --show-error \
   --request POST --header 'Content-Type: application/json' \
   --header "Idempotency-Key: $IDEMPOTENCY_KEY" \
-  --data '{"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[{"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"}]}' \
+  --data '{"orderId":"ORDER-001","items":[{"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"}]}' \
   "$BASE_URL/api/v1/reservations")
 RESERVATION_ID=$(printf '%s' "$CREATED" | jq -er '.[0].id')
 printf '%s\n' "$CREATED"
 
 # The same key and body replays the identical terminal result.
-curl --fail-with-body --request POST --header 'Content-Type: application/json' \
+curl --config "$RENTFLOW_CURL_CONFIG" --fail-with-body --request POST --header 'Content-Type: application/json' \
   --header "Idempotency-Key: $IDEMPOTENCY_KEY" \
-  --data '{"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[{"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"}]}' \
+  --data '{"orderId":"ORDER-001","items":[{"serialNumber":"DRILL-001","startDate":"2026-10-01","endDate":"2026-10-03"}]}' \
   "$BASE_URL/api/v1/reservations"
 
-curl --fail-with-body "$BASE_URL/api/v1/reservations/$RESERVATION_ID"
+curl --config "$RENTFLOW_CURL_CONFIG" --fail-with-body "$BASE_URL/api/v1/reservations/$RESERVATION_ID"
 
-curl --fail-with-body \
+curl --config "$RENTFLOW_CURL_CONFIG" --fail-with-body \
   "$BASE_URL/api/v1/reservations?page=0&size=20&sort=startDate&direction=desc"
 
-curl --fail-with-body --request PUT --header 'Content-Type: application/json' \
-  --data '{"serialNumber":"DRILL-001","customerId":"CUSTOMER-001","orderId":"ORDER-001","startDate":"2026-10-02","endDate":"2026-10-05","status":"CONFIRMED"}' \
+curl --config "$RENTFLOW_CURL_CONFIG" --fail-with-body --request PUT --header 'Content-Type: application/json' \
+  --data '{"serialNumber":"DRILL-001","orderId":"ORDER-001","startDate":"2026-10-02","endDate":"2026-10-05","status":"CONFIRMED"}' \
   "$BASE_URL/api/v1/reservations/$RESERVATION_ID"
 
-curl --fail-with-body --request POST --output /dev/null --write-out '%{http_code}\n' \
+curl --config "$RENTFLOW_CURL_CONFIG" --fail-with-body --request POST --output /dev/null --write-out '%{http_code}\n' \
   "$BASE_URL/api/v1/reservations/$RESERVATION_ID/cancel"
 
-curl --fail-with-body --request DELETE --output /dev/null --write-out '%{http_code}\n' \
+curl --config "$RENTFLOW_CURL_CONFIG" --fail-with-body --request DELETE --output /dev/null --write-out '%{http_code}\n' \
   "$BASE_URL/api/v1/reservations/$RESERVATION_ID"
 ```
 
@@ -265,9 +273,10 @@ Defaults are page 0, size 20, sort `id`, direction `asc`. Size is 1–100. Any r
 be the primary sort; ties use `id ASC`. Direction is case-insensitive. Unknown, repeated, blank,
 invalid query parameters and offsets above 2147483647 are rejected. Filtering is deferred.
 
-Creation acquires a PostgreSQL transaction advisory lock for the public key, checks the compact
+Creation first authorizes the caller and reads its verified owner, then acquires an issuer/subject-scoped
+PostgreSQL transaction advisory lock for the external key, checks the compact
 terminal ledger, validates the current PostgreSQL UTC date, checks local active reservations once,
-and forwards the same key to `PATCH /api/v1/inventory/status`. The local transaction remains open
+and derives a stable, caller-distinct UUID key for `PATCH /api/v1/inventory/status`. The local transaction remains open
 through that synchronous call. On success, the created reservations and replayable `201` response
 snapshot commit together. Known validation, local-conflict, and Inventory business failures are
 also stored and replayed.
@@ -278,7 +287,10 @@ foreground attempts inside one circuit-breaker call. Retry waits use exponential
 200, 400, 800, and 1600 ms with 20-percent jitter.
 
 Reservation does no creation work after the HTTP response returns. Matching terminal responses
-replay from `reservation_creation_requests` for seven days without local or Inventory work.
+replay from `reservation_creation_requests` for seven days after current permission/target checks.
+Successful replay by every caller, including staff, verifies current issuer/subject ownership of all referenced IDs;
+deleted rows return 404, and a cancelled but still-owned row replays the original snapshot.
+Replay makes no Inventory call. Staff follows the same creation replay rules as customers.
 Concurrent execution of the same key returns `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1`;
 different payloads under an unexpired key return `422 IDEMPOTENCY_KEY_REUSED`. Temporary `502` and
 `503` integration results are not stored, so a same-key client retry starts another synchronous
@@ -290,7 +302,9 @@ background task deletes expired ledger rows.
 V1 creates `reservation.reservations`. The replacement V2 creates the six-column terminal
 idempotency ledger, adds the database timestamp default, and adds the active lookup index. V3 adds
 the cancellation outbox and its partial FIFO/cleanup indexes. V4 adds hold deadlines; V5 adds
-optional immutable W3C origin context to the outbox. Flyway history lives in
+optional immutable W3C origin context to the outbox. The single security V6 scopes creation keys to callers and resets development data for direct
+immutable ownership, without an intermediate mapping table (details below).
+Flyway history lives in
 `reservation.flyway_schema_history`.
 Hibernate validates mappings and never generates DDL. Flyway cannot create schemas and is the
 sole mechanism for evolving Reservation-owned application objects after platform provisioning.
@@ -323,8 +337,8 @@ Resilience4j and business meters remain available independently of trace samplin
 | `RESERVATION_KAFKA_CLUSTER_ID` | Empty; optional actual broker cluster ID to bypass discovery |
 
 Host execution exposes `http://127.0.0.1:8087/actuator/prometheus` and private health. Application
-port 8080 (published as 8082 locally) serves `/livez` and `/readyz` but returns 404 for every
-`/actuator/*` endpoint. Collector, Kafka and Inventory health do not affect readiness. Production
+port 8080 (published as 8082 locally) serves `/livez` and `/readyz` but denies every
+`/actuator/*` endpoint with 401 (anonymous) or 403 (authenticated). Collector, Kafka and Inventory health do not affect readiness. Production
 network protection, telemetry access, authentication/TLS and retention belong to deployment.
 
 OTLP export is asynchronous, with a 2048-span queue, batches up to 512 and two-second connect/call
@@ -452,3 +466,172 @@ runtime, creation/retrieval and persistence across application/stack restart, an
 liveness versus database-aware readiness through an outage and recovery. It removes only its
 isolated containers and test volume on exit. The Docker build runs `package` (including unit tests);
 the separate Maven `verify` command is required for integration and formatting verification.
+
+
+## Security setup
+
+The API validates signed access tokens for `reservation-api`, using Common's exact issuer,
+RS256, required access-token claims and 30-second skew. Permissions come only from allowlisted
+`resource_access["reservation-api"].roles`. Approved human clients are `reservation-swagger`
+and `rentflow-pkce-check`; machine clients have no inbound business access. The shared realm
+roles expand to these independent permissions:
+
+| Operation | CUSTOMER | STAFF |
+| --- | --- | --- |
+| POST collection | reservation:create, caller owns rows | reservation:create, caller owns rows |
+| GET item | reservation:read, owned row | reservation:read:any |
+| GET collection | reservation:list, owned rows and totals | reservation:list:any |
+| POST item/cancel | reservation:cancel, owned locked row | reservation:cancel:any |
+| PUT / DELETE item | Denied | reservation:manage |
+
+Ownership needs no provisioning or mapping table. Manage grants only PUT/DELETE and does
+not imply any other permission. Staff PUT preserves the owner and may change order/serial/dates or set any defined
+status, including resurrecting a cancelled row with its original deadline. Neither PUT nor DELETE
+emits a cancellation event or releases Inventory. Use the explicit cancel operation for release.
+`orderId` is an unverified business reference; matching it never grants access. Unsupported
+customer/order filters, forged user headers and token-foreign customer claims confer no ownership.
+
+For local development, Common's issuer is
+`http://auth.rentflow.test:8180/realms/rentflow-local`; add `127.0.0.1 auth.rentflow.test` on the
+host and supply matching container DNS/network access. Development and smoke never trust each
+other's issuer. Production requires its own HTTPS issuer and HTTPS Inventory/token transport.
+Explicit local/test profiles permit isolated HTTP; neither disables authentication.
+
+Set these nonsecret Compose inputs:
+
+```bash
+export RESERVATION_ISSUER_URI=http://auth.rentflow.test:8180/realms/rentflow-local
+export RESERVATION_JWKS_URI="$RESERVATION_ISSUER_URI/protocol/openid-connect/certs"
+export RESERVATION_TOKEN_URI="$RESERVATION_ISSUER_URI/protocol/openid-connect/token"
+export RESERVATION_CLIENT_SECRET_FILE=/absolute/protected/recipient/client-secret
+```
+
+The recipient file must contain **only reservation-service's** client secret and be readable by
+container UID 10001. Use a private recipient directory/copy and UID 10001 ownership plus mode 0400
+(or an equivalent narrowly granted ACL); keep Common's original source host-owned 0600 and do
+not broaden its permissions. Compose mounts only that recipient file read-only under
+`/run/secrets/spring.security.oauth2.client.registration.inventory.client-secret`. There is no
+fallback secret. The optional config-tree import does not make the required property optional.
+For IDE execution, use a user-owned 0700 `.secrets/ide/` directory with the same property filename
+and mode 0600, then activate `local`. This directory is ignored by Git and Docker. Do not put
+credentials into YAML, environment dumps, process arguments, shell history or image layers.
+After an explicit Common rotation, refresh the recipient and restart Reservation; hot reload is
+not implemented. Existing issued tokens remain valid through their remaining lifetime plus skew.
+
+Only creation needs the Inventory OAuth client. It acquires Client Credentials as
+`reservation-service`, with only `inventory-api` / `inventory:reserve`, caches the authorized
+client under that fixed application principal, and renews 30 seconds before expiry. No incoming
+human token or X-User header is forwarded. Background gateway calls need no human context;
+expiration, outbox relay, cleanup and monitoring retain their internal authorization boundary.
+Tokens remain in process memory and never enter reservation rows, replay snapshots or Kafka.
+
+JWT/JWKS and token configuration is explicit, so valid configuration can start with Keycloak
+offline. Known cached signing keys/tokens continue within their supported lifetimes; unresolved
+keys or required token acquisition fail closed. Keycloak, Inventory and Kafka are outside the
+existing readiness contract. Token connect/read limits are two seconds and token/resource
+redirects are disabled. Inventory 401 fails the current request and evicts the machine token;
+only a later explicit request reacquires. Inventory 403 retains the token. Neither causes an
+automatic retry of the write. Existing eligible resource retries reuse the exact downstream key.
+
+| Failure | Public result |
+| --- | --- |
+| Missing/invalid inbound credential | 401 AUTHENTICATION_REQUIRED |
+| Missing capability or unapproved client | 403 ACCESS_DENIED |
+| Missing/foreign own get/cancel, or deleted success replay IDs (including staff) | 404 RESERVATION_NOT_FOUND |
+| Rejected machine credentials/token shape or Inventory 401/403 | 502 INVENTORY_SERVICE_ERROR |
+| Token transport/rate-limit/provider outage or exhausted resource outage | 503 INVENTORY_SERVICE_UNAVAILABLE |
+
+Inbound security responses are fixed Problem Details. Missing credentials challenge with Bearer,
+invalid credentials with invalid_token and authenticated denials with insufficient_scope; no
+provider descriptions or role scopes are advertised. Ownership 404 and dependency 502/503 have
+no authentication challenge. Security/dependency failures have no replay headers or saved terminal
+outcome. Local rollback cannot undo an already committed Inventory claim: retry explicitly with
+the same external key within retention, rather than changing keys or assuming remote rollback.
+There is no new distributed transaction or compensation flow.
+
+### Customer identity
+
+Creation assigns `customerId` from the verified access token's `sub` and stores its exact `iss`
+alongside it. Ownership checks compare both; no Keycloak user lookup, registration or operator
+mapping is required. Username, email, customerId claims and user headers confer no ownership.
+`customerId` is response-only, and the issuer stays internal. POST accepts only `orderId` and
+`items`; PUT accepts only serial number, order, dates and status. Supplying `customerId` or
+`customerIssuer` in either body returns 400. A new permitted user can create immediately and
+has an empty own collection until creation.
+
+Staff creation uses `reservation:create` and makes the staff caller the owner, just like customer
+creation. `reservation:create:any` grants nothing. Staff retains independently granted cross-customer
+read/list/cancel and manage powers. PUT preserves the original owner, including when staff edits
+another customer's reservation; creating on behalf of another customer and owner reassignment
+are outside this API. Account/realm replacement requires a separately designed identity migration.
+
+### Local Swagger and private API-tool credentials
+
+Documentation is disabled by default. The explicit `local` profile enables application-only
+Swagger/OpenAPI GET paths with Authorization Code, S256 PKCE, client `reservation-swagger`,
+`openid`, and no secret or persisted authorization. The exact callback is
+`http://localhost:8082/swagger-ui/oauth2-redirect.html`, origin `http://localhost:8082`; a different
+port/origin needs an explicit Common registration update. API roles are not OAuth scopes.
+For scripts, obtain a short-lived access token through an approved PKCE client, then enter it
+without echoing it or saving its value in history:
+
+```bash
+umask 077
+mkdir -p .secrets/tools
+chmod 700 .secrets/tools
+export RENTFLOW_CURL_CONFIG="$PWD/.secrets/tools/access.curl"
+read -r -s -p 'Access token: ' rentflow_access_token
+printf '\n'
+printf 'header = "Authorization: Bearer %s"\n' "$rentflow_access_token" > "$RENTFLOW_CURL_CONFIG"
+unset rentflow_access_token
+curl --config "$RENTFLOW_CURL_CONFIG" --fail --silent --show-error http://localhost:8082/api/v1/reservations
+# Remove the private credential when finished.
+rm -- "$RENTFLOW_CURL_CONFIG"
+```
+
+### Migration, operational policy and acceptance
+
+V1–V5 remain unchanged. The consolidated V6 discards development reservations, cancellation outbox
+rows and creation replay records, adds required issuer ownership and caller-scoped creation keys,
+and creates the `(customer_issuer, customer_id, id)` index. It creates no identity mapping table. Identity columns use text,
+without the old domain-ID length restriction. This is an explicitly authorized development reset,
+with no legacy compatibility path; repeating Flyway preserves all post-migration rows.
+
+Stop/drain old writers and workers, back up any needed data, deploy the matching binary/schema,
+inject credentials and provision human grants before customer access. Reconcile outstanding
+Inventory claims before cutover; clearing Reservation data does not release Inventory. Old binaries
+cannot safely write the new schema. Rollback requires coordinated schema/data restoration, and
+an old key becomes a new operation after reset. Implementation tests use isolated databases;
+they do not run this reset against the developer environment. Databases that applied the earlier
+V6/V7 pair need a separate development database recreation; this change does not repair Flyway
+history or reset those databases.
+
+Current create authorization always precedes scoped replay. Different subjects using the same
+external UUID have separate locks, results and derived Inventory UUIDs. Token renewal and approved
+client changes preserve those identities. Different staff and customer subjects do not share outcomes. Cleanup joins on both key components and retains the
+existing seven-day TTL, 1000-row chunks, runtime budgets and unexpired neighboring scopes.
+
+Only minimal GET /livez and /readyz are public application probes. The separate private management
+listener permits GET health, health/liveness, health/readiness and prometheus; all other management
+paths are 403 without challenges, regardless of credentials. Listener selection uses the actual
+local port, never forwarded headers. Native protected-resource metadata GETs are public before
+bearer processing and expose only Spring's request-derived resource URL, issuer, header bearer
+method and certificate-binding=false. There is no public-origin rewriting or blanket well-known
+allowlist. APIs are stateless without cookies, login redirects, Basic/form authentication or CORS.
+
+Bounded diagnostics are `reservation.security.denials{reason=authentication|authorization,
+surface=application|management}` and `reservation.security.outbound.failures{dependency=inventory,
+reason=credentials|token_response|token_unavailable|upstream_unauthenticated|upstream_forbidden}`.
+No principal IDs, scope hashes, token/secret/provider text or request bodies are security metric
+labels or diagnostics. Existing approved cancellation trace correlation remains; diagnostics
+follow existing retention/access and are not a durable business audit.
+
+The isolated container smoke uses the existing Inventory nginx fixture plus a temporary host-side
+signing/token runner, its own PostgreSQL volume, private credential files and token-derived test owners.
+It retains runtime/persistence/CRUD/outage checks and adds authenticated ownership/replay denials;
+it proves no real Keycloak/Inventory interoperability. `RESERVATION_SMOKE_FAIL_AFTER_START=1`
+exercises cleanup after an intentional failure. See the [implementation acceptance](.specs/security/implementation-acceptance.md)
+for actual service evidence. Common's separate C1 must provision all eight human roles (STAFF now uses reservation:create), preserve
+both narrow machine grants, verify actual PKCE/service flows and restore
+`Combined container smoke verification passed`. Broader integrated operational acceptance and
+production hardening remain Phases 5 and 7; HTTP authentication does not secure Kafka publishers.

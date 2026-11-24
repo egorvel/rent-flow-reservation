@@ -17,3 +17,5 @@ docker
 scripts
 README.md
 AGENTS.md
+
+.secrets

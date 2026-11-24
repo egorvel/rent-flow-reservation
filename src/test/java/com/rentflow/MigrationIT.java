@@ -92,15 +92,20 @@ class MigrationIT extends PostgresIntegrationTest {
     void migrationsRunOnceAndCommittedDataSurvivesRestart() {
         Instant databaseBefore = creationRequests.databaseTime();
         Reservation saved = repository.saveAndFlush(new Reservation(
-                "RESTART-001", "CUSTOMER-1", "ORDER-1", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3)));
+                "RESTART-001",
+                "CUSTOMER-1",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                "ORDER-1",
+                LocalDate.of(2026, 10, 1),
+                LocalDate.of(2026, 10, 3)));
         Instant databaseAfter = creationRequests.databaseTime();
         assertThat(saved.getTimestamp()).isBetween(databaseBefore, databaseAfter);
         assertThat(saved.getTimestamp().getNano() % 1000).isZero();
         assertThat(flyway.migrate().migrationsExecuted).isZero();
         assertThat(jdbc.queryForObject(
-                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2', '3', '4', '5') AND success",
+                        "SELECT count(*) FROM reservation.flyway_schema_history WHERE version IN ('1', '2', '3', '4', '5', '6') AND success",
                         Integer.class))
-                .isEqualTo(5);
+                .isEqualTo(6);
         try (ConfigurableApplicationContext context = start(Map.of())) {
             Reservation restored = context.getBean(ReservationRepository.class)
                     .findById(saved.getId())
@@ -121,7 +126,14 @@ class MigrationIT extends PostgresIntegrationTest {
                         ORDER BY ordinal_position
                         """, String.class))
                 .containsExactly(
-                        "idempotency_key", "fingerprint", "http_status", "outcome", "recorded_at", "expires_at");
+                        "idempotency_key",
+                        "fingerprint",
+                        "http_status",
+                        "outcome",
+                        "recorded_at",
+                        "expires_at",
+                        "caller_scope",
+                        "target_customer_id");
         assertThat(jdbc.queryForList("""
                         SELECT indexname
                         FROM pg_indexes
@@ -258,7 +270,8 @@ class MigrationIT extends PostgresIntegrationTest {
                 .containsExactlyInAnyOrder(
                         "reservations_pkey",
                         "idx_reservations_creation_active_lookup",
-                        "idx_reservations_held_expiration");
+                        "idx_reservations_held_expiration",
+                        "idx_reservations_customer_identity");
         insert("DUPLICATE-001", "CUSTOMER-1", "ORDER-1", "2026-10-01", "2026-10-03", "HELD");
         insert("DUPLICATE-001", "CUSTOMER-1", "ORDER-1", "2026-10-01", "2026-10-03", "HELD");
         assertThat(jdbc.queryForObject(
@@ -272,7 +285,7 @@ class MigrationIT extends PostgresIntegrationTest {
         assertInvalid("A", "C", "O", "10000-01-01", "10000-01-02", "HELD");
         assertInvalid("A", "C", "O", "2026-10-01", "2026-10-03", "EXPIRED");
         assertThatThrownBy(() -> jdbc.update(
-                        "INSERT INTO reservation.reservations (id, serial_number, customer_id, order_id, start_date, end_date, created_at, hold_expires_at, status) VALUES (?, 'DEADLINE-001', 'C', 'O', DATE '2026-10-01', DATE '2026-10-03', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'HELD')",
+                        "INSERT INTO reservation.reservations (id, serial_number, customer_id, customer_issuer, order_id, start_date, end_date, created_at, hold_expires_at, status) VALUES (?, 'DEADLINE-001', 'C', 'https://issuer.example', 'O', DATE '2026-10-01', DATE '2026-10-03', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'HELD')",
                         UUID.randomUUID()))
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
@@ -358,7 +371,7 @@ class MigrationIT extends PostgresIntegrationTest {
 
     private void insert(String serial, String customer, String order, String start, String end, String status) {
         jdbc.update(
-                "INSERT INTO reservation.reservations (id, serial_number, customer_id, order_id, start_date, end_date, created_at, hold_expires_at, status) VALUES (?, ?, ?, ?, ?::date, ?::date, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '10 minutes', ?)",
+                "INSERT INTO reservation.reservations (id, serial_number, customer_id, customer_issuer, order_id, start_date, end_date, created_at, hold_expires_at, status) VALUES (?, ?, ?, 'https://issuer.example', ?, ?::date, ?::date, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '10 minutes', ?)",
                 UUID.randomUUID(),
                 serial,
                 customer,
@@ -371,8 +384,8 @@ class MigrationIT extends PostgresIntegrationTest {
     private void insertCreationOutcome(UUID key, String fingerprint, int status, String outcome, String expiry) {
         jdbc.update("""
                 INSERT INTO reservation.reservation_creation_requests (
-                    idempotency_key, fingerprint, http_status, outcome, recorded_at, expires_at
-                ) VALUES (?, ?, ?, ?::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + ?::interval)
+                    idempotency_key, fingerprint, http_status, outcome, recorded_at, expires_at, caller_scope, target_customer_id
+                ) VALUES (?, ?, ?, ?::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + ?::interval, 'p1:' || repeat('0', 64), 'MIGRATION-CUSTOMER')
                 """, key, fingerprint, status, outcome, expiry);
     }
 
@@ -409,12 +422,25 @@ class MigrationIT extends PostgresIntegrationTest {
         properties.put("spring.datasource.password", RESERVATION_PASSWORD);
         properties.put("spring.main.banner-mode", "off");
         properties.put("logging.level.root", "OFF");
+        properties.put("spring.profiles.active", "test");
+        properties.put(
+                "spring.security.oauth2.resourceserver.jwt.issuer-uri",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer());
+        properties.put(
+                "spring.security.oauth2.resourceserver.jwt.jwk-set-uri",
+                com.rentflow.support.SignedJwtFixture.SHARED.jwks());
+        properties.put(
+                "spring.security.oauth2.client.provider.keycloak.token-uri",
+                com.rentflow.support.SignedJwtFixture.SHARED.tokenUri());
+        properties.put("spring.security.oauth2.client.registration.inventory.client-secret", "isolated-test-only");
         properties.putAll(overrides);
-        String[] arguments = properties.entrySet().stream()
-                .map(entry -> "--" + entry.getKey() + "=" + entry.getValue())
-                .toArray(String[]::new);
         return new SpringApplicationBuilder(ReservationApplication.class)
                 .web(WebApplicationType.NONE)
-                .run(arguments);
+                .profiles("test")
+                .initializers(context -> context.getEnvironment()
+                        .getPropertySources()
+                        .addFirst(new org.springframework.core.env.MapPropertySource(
+                                "isolated-migration-settings", properties)))
+                .run();
     }
 }

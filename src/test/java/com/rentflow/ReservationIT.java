@@ -54,7 +54,6 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
@@ -82,7 +81,7 @@ class ReservationIT extends PostgresIntegrationTest {
     private static final String START = START_DATE.toString();
     private static final String END = START_DATE.plusDays(2).toString();
     private static final String CREATE = """
-        {"serialNumber":"DRILL-001","customerId":"CUSTOMER-001","orderId":"ORDER-001","startDate":"%s","endDate":"%s"}
+        {"serialNumber":"DRILL-001","orderId":"ORDER-001","startDate":"%s","endDate":"%s"}
         """.formatted(START, END);
 
     @Autowired
@@ -157,7 +156,7 @@ class ReservationIT extends PostgresIntegrationTest {
         @Test
         void oneSuccessfulBatchUsesOneDatabaseCreationTimeAndConfiguredDeadline() throws Exception {
             String request = """
-                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                {"orderId":"ORDER-001","items":[
                   {"serialNumber":"BATCH-001","startDate":"%s","endDate":"%s"},
                   {"serialNumber":"BATCH-002","startDate":"%s","endDate":"%s"}
                 ]}
@@ -189,8 +188,13 @@ class ReservationIT extends PostgresIntegrationTest {
         @ParameterizedTest
         @ValueSource(strings = {"HELD", "CONFIRMED"})
         void cancelsEligibleReservationAndCommitsOneOutboxEvent(String initialStatus) throws Exception {
-            Reservation reservation =
-                    new Reservation("CANCEL-001", "CUSTOMER-001", "ORDER-001", START_DATE, START_DATE.plusDays(2));
+            Reservation reservation = new Reservation(
+                    "CANCEL-001",
+                    "CUSTOMER-001",
+                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                    "ORDER-001",
+                    START_DATE,
+                    START_DATE.plusDays(2));
             reservation.changeStatus(ReservationStatus.valueOf(initialStatus));
             Reservation saved = repository.saveAndFlush(reservation);
 
@@ -210,8 +214,13 @@ class ReservationIT extends PostgresIntegrationTest {
 
         @Test
         void repeatedCancellationIsAnEmptyNoOpWithoutAnotherEvent() throws Exception {
-            Reservation reservation = repository.saveAndFlush(
-                    new Reservation("CANCEL-NOOP", "CUSTOMER-001", "ORDER-001", START_DATE, START_DATE.plusDays(2)));
+            Reservation reservation = repository.saveAndFlush(new Reservation(
+                    "CANCEL-NOOP",
+                    "CUSTOMER-001",
+                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                    "ORDER-001",
+                    START_DATE,
+                    START_DATE.plusDays(2)));
 
             for (int request = 0; request < 2; request++) {
                 mvc.perform(post(PATH + "/" + reservation.getId() + "/cancel"))
@@ -239,8 +248,13 @@ class ReservationIT extends PostgresIntegrationTest {
 
         @Test
         void concurrentCancellationCreatesOneLogicalEvent() throws Exception {
-            Reservation reservation = repository.saveAndFlush(
-                    new Reservation("CANCEL-RACE", "CUSTOMER-001", "ORDER-001", START_DATE, START_DATE.plusDays(2)));
+            Reservation reservation = repository.saveAndFlush(new Reservation(
+                    "CANCEL-RACE",
+                    "CUSTOMER-001",
+                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                    "ORDER-001",
+                    START_DATE,
+                    START_DATE.plusDays(2)));
             int requests = 8;
             CountDownLatch ready = new CountDownLatch(requests);
             CountDownLatch start = new CountDownLatch(1);
@@ -250,7 +264,12 @@ class ReservationIT extends PostgresIntegrationTest {
                     futures.add(executor.submit(() -> {
                         ready.countDown();
                         start.await(5, TimeUnit.SECONDS);
-                        cancellationService.cancel(reservation.getId());
+                        com.rentflow.support.SignedJwtFixture.authenticateStaff();
+                        try {
+                            cancellationService.cancel(reservation.getId());
+                        } finally {
+                            org.springframework.security.core.context.SecurityContextHolder.clearContext();
+                        }
                         return null;
                     }));
                 }
@@ -298,7 +317,12 @@ class ReservationIT extends PostgresIntegrationTest {
         @Test
         void ignoresAnOutdatedConfirmedReservation() throws Exception {
             Reservation outdated = new Reservation(
-                    "DRILL-001", "old-customer", "old-order", LocalDate.of(2000, 1, 1), LocalDate.of(2000, 1, 2));
+                    "DRILL-001",
+                    "old-customer",
+                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                    "old-order",
+                    LocalDate.of(2000, 1, 1),
+                    LocalDate.of(2000, 1, 2));
             outdated.changeStatus(ReservationStatus.CONFIRMED);
             repository.saveAndFlush(outdated);
 
@@ -311,7 +335,13 @@ class ReservationIT extends PostgresIntegrationTest {
         @ValueSource(strings = {"HELD", "CONFIRMED"})
         void treatsAnActiveReservationEndingTodayAsAConflict(String reservationStatus) throws Exception {
             LocalDate today = creationRequestRepository.databaseUtcDate();
-            Reservation existing = new Reservation("DRILL-001", "old-customer", "old-order", today.minusDays(2), today);
+            Reservation existing = new Reservation(
+                    "DRILL-001",
+                    "old-customer",
+                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                    "old-order",
+                    today.minusDays(2),
+                    today);
             existing.changeStatus(ReservationStatus.valueOf(reservationStatus));
             repository.saveAndFlush(existing);
 
@@ -328,8 +358,13 @@ class ReservationIT extends PostgresIntegrationTest {
         @Test
         void allowsACancelledFutureReservationAndKeepsSerialsCaseSensitive() throws Exception {
             LocalDate today = creationRequestRepository.databaseUtcDate();
-            Reservation cancelled =
-                    new Reservation("DRILL-001", "old-customer", "old-order", today.plusDays(2), today.plusDays(3));
+            Reservation cancelled = new Reservation(
+                    "DRILL-001",
+                    "old-customer",
+                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                    "old-order",
+                    today.plusDays(2),
+                    today.plusDays(3));
             cancelled.changeStatus(ReservationStatus.CANCELLED);
             repository.saveAndFlush(cancelled);
 
@@ -347,10 +382,22 @@ class ReservationIT extends PostgresIntegrationTest {
         void reportsAllLocalConflictsInRequestOrder() throws Exception {
             LocalDate today = creationRequestRepository.databaseUtcDate();
             repository.saveAllAndFlush(List.of(
-                    new Reservation("SAW-001", "old-customer", "old-order", today, today.plusDays(2)),
-                    new Reservation("DRILL-001", "old-customer", "old-order", today, today.plusDays(2))));
+                    new Reservation(
+                            "SAW-001",
+                            "old-customer",
+                            com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                            "old-order",
+                            today,
+                            today.plusDays(2)),
+                    new Reservation(
+                            "DRILL-001",
+                            "old-customer",
+                            com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                            "old-order",
+                            today,
+                            today.plusDays(2))));
             String body = """
-                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                {"orderId":"ORDER-001","items":[
                   {"serialNumber":"SAW-001","startDate":"%s","endDate":"%s"},
                   {"serialNumber":"MIXER-001","startDate":"%s","endDate":"%s"},
                   {"serialNumber":"DRILL-001","startDate":"%s","endDate":"%s"}
@@ -416,7 +463,7 @@ class ReservationIT extends PostgresIntegrationTest {
                                     "INVENTORY_ITEM_UNAVAILABLE",
                                     "Inventory item is not available."))));
             String body = """
-                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                {"orderId":"ORDER-001","items":[
                   {"serialNumber":"DRILL-001","startDate":"%s","endDate":"%s"},
                   {"serialNumber":"MIXER-001","startDate":"%s","endDate":"%s"}
                 ]}
@@ -464,7 +511,13 @@ class ReservationIT extends PostgresIntegrationTest {
 
             assertThat(repository.count()).isZero();
             assertThat(creationRequestRepository.count()).isOne();
-            verify(inventoryGateway).claim(org.mockito.ArgumentMatchers.eq(key), any());
+            verify(inventoryGateway)
+                    .claim(
+                            org.mockito.ArgumentMatchers.eq(com.rentflow.service.IdempotencyFingerprint.inventoryKey(
+                                    com.rentflow.service.IdempotencyFingerprint.callerScope(
+                                            com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff"),
+                                    key)),
+                            any());
         }
 
         @Test
@@ -490,7 +543,13 @@ class ReservationIT extends PostgresIntegrationTest {
                             .content(body))
                     .andExpect(status().isCreated());
             assertThat(repository.count()).isOne();
-            verify(inventoryGateway, times(2)).claim(org.mockito.ArgumentMatchers.eq(key), any());
+            verify(inventoryGateway, times(2))
+                    .claim(
+                            org.mockito.ArgumentMatchers.eq(com.rentflow.service.IdempotencyFingerprint.inventoryKey(
+                                    com.rentflow.service.IdempotencyFingerprint.callerScope(
+                                            com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff"),
+                                    key)),
+                            any());
         }
 
         @Test
@@ -521,7 +580,13 @@ class ReservationIT extends PostgresIntegrationTest {
 
             assertThat(repository.count()).isEqualTo(2);
             assertThat(creationRequestRepository.count()).isOne();
-            verify(inventoryGateway, times(2)).claim(org.mockito.ArgumentMatchers.eq(key), any());
+            verify(inventoryGateway, times(2))
+                    .claim(
+                            org.mockito.ArgumentMatchers.eq(com.rentflow.service.IdempotencyFingerprint.inventoryKey(
+                                    com.rentflow.service.IdempotencyFingerprint.callerScope(
+                                            com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff"),
+                                    key)),
+                            any());
         }
 
         @Test
@@ -541,7 +606,13 @@ class ReservationIT extends PostgresIntegrationTest {
 
             assertThat(repository.count()).isZero();
             assertThat(creationRequestRepository.count()).isZero();
-            verify(inventoryGateway, times(2)).claim(org.mockito.ArgumentMatchers.eq(key), any());
+            verify(inventoryGateway, times(2))
+                    .claim(
+                            org.mockito.ArgumentMatchers.eq(com.rentflow.service.IdempotencyFingerprint.inventoryKey(
+                                    com.rentflow.service.IdempotencyFingerprint.callerScope(
+                                            com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff"),
+                                    key)),
+                            any());
         }
 
         @Test
@@ -569,7 +640,13 @@ class ReservationIT extends PostgresIntegrationTest {
 
             assertThat(repository.count()).isZero();
             assertThat(creationRequestRepository.count()).isOne();
-            verify(inventoryGateway, times(1)).claim(org.mockito.ArgumentMatchers.eq(key), any());
+            verify(inventoryGateway, times(1))
+                    .claim(
+                            org.mockito.ArgumentMatchers.eq(com.rentflow.service.IdempotencyFingerprint.inventoryKey(
+                                    com.rentflow.service.IdempotencyFingerprint.callerScope(
+                                            com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff"),
+                                    key)),
+                            any());
         }
 
         @Test
@@ -624,7 +701,13 @@ class ReservationIT extends PostgresIntegrationTest {
 
             assertThat(repository.count()).isOne();
             assertThat(creationRequestRepository.count()).isOne();
-            verify(inventoryGateway).claim(org.mockito.ArgumentMatchers.eq(key), any());
+            verify(inventoryGateway)
+                    .claim(
+                            org.mockito.ArgumentMatchers.eq(com.rentflow.service.IdempotencyFingerprint.inventoryKey(
+                                    com.rentflow.service.IdempotencyFingerprint.callerScope(
+                                            com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff"),
+                                    key)),
+                            any());
         }
 
         @Test
@@ -671,8 +754,16 @@ class ReservationIT extends PostgresIntegrationTest {
 
             assertThat(cleanup.deleteExpiredCreationChunk()).isOne();
 
-            assertThat(creationRequestRepository.findById(expiredKey)).isEmpty();
-            assertThat(creationRequestRepository.findById(retainedKey)).isPresent();
+            assertThat(creationRequestRepository.findById(new com.rentflow.model.ReservationCreationRequestId(
+                            com.rentflow.service.IdempotencyFingerprint.callerScope(
+                                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff"),
+                            expiredKey)))
+                    .isEmpty();
+            assertThat(creationRequestRepository.findById(new com.rentflow.model.ReservationCreationRequestId(
+                            com.rentflow.service.IdempotencyFingerprint.callerScope(
+                                    com.rentflow.support.SignedJwtFixture.SHARED.issuer(), "staff"),
+                            retainedKey)))
+                    .isPresent();
             assertThat(repository.count()).isEqualTo(2);
         }
 
@@ -699,7 +790,7 @@ class ReservationIT extends PostgresIntegrationTest {
         @Test
         void rejectsMissingKeyAndReplaysStoredDuplicateSerialValidation() throws Exception {
             String duplicate = """
-                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                {"orderId":"ORDER-001","items":[
                   {"serialNumber":"DRILL-001","startDate":"%s","endDate":"%s"},
                   {"serialNumber":"DRILL-001","startDate":"%s","endDate":"%s"}
                 ]}
@@ -731,7 +822,7 @@ class ReservationIT extends PostgresIntegrationTest {
         void replacementUpdatesAllMutableFieldsAndPreservesManagedFields(String newStatus) throws Exception {
             JsonNode original = create(CREATE);
             String replacement = """
-            {"serialNumber":"SAW-002","customerId":"CUSTOMER-002","orderId":"ORDER-002","startDate":"2027-01-01","endDate":"2027-01-02","status":"%s"}
+            {"serialNumber":"SAW-002","orderId":"ORDER-002","startDate":"2027-01-01","endDate":"2027-01-02","status":"%s"}
             """.formatted(newStatus);
             JsonNode updated =
                     body(mvc.perform(put(PATH + "/" + original.path("id").asString())
@@ -739,7 +830,7 @@ class ReservationIT extends PostgresIntegrationTest {
                                     .content(replacement))
                             .andExpect(status().isOk())
                             .andExpect(jsonPath("$.serialNumber").value("SAW-002"))
-                            .andExpect(jsonPath("$.customerId").value("CUSTOMER-002"))
+                            .andExpect(jsonPath("$.customerId").value("staff"))
                             .andExpect(jsonPath("$.orderId").value("ORDER-002"))
                             .andExpect(jsonPath("$.startDate").value("2027-01-01"))
                             .andExpect(jsonPath("$.endDate").value("2027-01-02"))
@@ -875,7 +966,7 @@ class ReservationIT extends PostgresIntegrationTest {
                     "[]",
                     "",
                     valid.replace("\"serialNumber\":\"DRILL-001\",", ""),
-                    valid.replace("\"customerId\":\"CUSTOMER-001\",", ""),
+                    valid.replace("}", ",\"customerId\":\"foreign\"}"),
                     valid.replace("\"orderId\":\"ORDER-001\",", ""),
                     valid.replace("\"startDate\":\"" + START + "\",", ""),
                     valid.replace("\"endDate\":\"" + END + "\",", ""),
@@ -883,11 +974,11 @@ class ReservationIT extends PostgresIntegrationTest {
                     valid.replace("DRILL-001", ""),
                     valid.replace("DRILL-001", "/bad"),
                     valid.replace("DRILL-001", "X".repeat(65)),
-                    valid.replace("CUSTOMER-001", " "),
-                    valid.replace("CUSTOMER-001", "X".repeat(65)),
+                    valid.replace("}", ",\"customerId\":null}"),
+                    valid.replace("}", ",\"customerIssuer\":\"foreign\"}"),
                     valid.replace("ORDER-001", " "),
                     valid.replace("ORDER-001", "X".repeat(65)),
-                    valid.replace("\"CUSTOMER-001\"", "{}"),
+                    valid.replace("}", ",\"customerId\":{}}"),
                     valid.replace("\"ORDER-001\"", "[]"),
                     valid.replace("\"CONFIRMED\"", "null"),
                     valid.replace("\"CONFIRMED\"", "1"),
@@ -906,10 +997,9 @@ class ReservationIT extends PostgresIntegrationTest {
         @Test
         void missingFieldsProduceSortedViolations() throws Exception {
             problem(post(PATH).contentType(MediaType.APPLICATION_JSON).content("{}"), 400, "VALIDATION_FAILED")
-                    .andExpect(jsonPath("$.violations", hasSize(3)))
-                    .andExpect(jsonPath("$.violations[0].field").value("customerId"))
-                    .andExpect(jsonPath("$.violations[1].field").value("items"))
-                    .andExpect(jsonPath("$.violations[2].field").value("orderId"));
+                    .andExpect(jsonPath("$.violations", hasSize(2)))
+                    .andExpect(jsonPath("$.violations[0].field").value("items"))
+                    .andExpect(jsonPath("$.violations[1].field").value("orderId"));
         }
     }
 
@@ -1047,12 +1137,12 @@ class ReservationIT extends PostgresIntegrationTest {
                             patch(PATH + "/" + UUID.randomUUID())
                                     .contentType(MediaType.APPLICATION_JSON)
                                     .content("{}"),
-                            405,
-                            "METHOD_NOT_ALLOWED")
-                    .andExpect(header().string("Allow", containsString("PUT")));
+                            403,
+                            "ACCESS_DENIED")
+                    .andExpect(header().doesNotExist("Allow"));
             problem(post(PATH).contentType(MediaType.TEXT_PLAIN).content(CREATE), 415, "UNSUPPORTED_MEDIA_TYPE");
             problem(get(PATH).accept(MediaType.APPLICATION_XML), 406, "NOT_ACCEPTABLE");
-            problem(get("/api/v1/missing"), 404, "RESOURCE_NOT_FOUND");
+            problem(get("/api/v1/missing"), 403, "ACCESS_DENIED");
         }
 
         @Test
@@ -1063,8 +1153,8 @@ class ReservationIT extends PostgresIntegrationTest {
                         .andExpect(jsonPath("$.status").value("UP"))
                         .andExpect(jsonPath("$.components").doesNotExist());
             }
-            mvc.perform(get("/actuator/health")).andExpect(status().isNotFound());
-            mvc.perform(get("/actuator/env")).andExpect(status().isNotFound());
+            mvc.perform(get("/actuator/health")).andExpect(status().isForbidden());
+            mvc.perform(get("/actuator/env")).andExpect(status().isForbidden());
         }
     }
 
@@ -1085,9 +1175,8 @@ class ReservationIT extends PostgresIntegrationTest {
     private String batch(String request) throws Exception {
         JsonNode item = mapper.readTree(request);
         return """
-                {"customerId":"%s","orderId":"%s","items":[{"serialNumber":"%s","startDate":"%s","endDate":"%s"}]}
+                {"orderId":"%s","items":[{"serialNumber":"%s","startDate":"%s","endDate":"%s"}]}
                 """.formatted(
-                        item.path("customerId").asString(),
                         item.path("orderId").asString(),
                         item.path("serialNumber").asString(),
                         item.path("startDate").asString(),
@@ -1096,7 +1185,7 @@ class ReservationIT extends PostgresIntegrationTest {
 
     private String batchFor(String serialNumber, LocalDate startDate, LocalDate endDate) {
         return """
-                {"customerId":"CUSTOMER-001","orderId":"ORDER-001","items":[
+                {"orderId":"ORDER-001","items":[
                   {"serialNumber":"%s","startDate":"%s","endDate":"%s"}
                 ]}
                 """.formatted(serialNumber, startDate, endDate);

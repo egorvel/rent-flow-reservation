@@ -1,0 +1,23 @@
+spring:
+  config:
+    import: optional:configtree:./.secrets/ide/
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://auth.rentflow.test:8180/realms/rentflow-local
+          jwk-set-uri: http://auth.rentflow.test:8180/realms/rentflow-local/protocol/openid-connect/certs
+      client:
+        provider:
+          keycloak:
+            token-uri: http://auth.rentflow.test:8180/realms/rentflow-local/protocol/openid-connect/token
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+    oauth:
+      client-id: reservation-swagger
+      scopes: openid
+      use-pkce-with-authorization-code-grant: true
+    persist-authorization: false

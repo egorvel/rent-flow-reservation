@@ -94,7 +94,7 @@ class ReservationHoldExpirationMigrationIT {
             insert.setObject(1, eventId);
             insert.executeUpdate();
         }
-        migrate(null);
+        migrate("5");
         try (Connection connection = connection();
                 PreparedStatement select = connection.prepareStatement("""
                     SELECT record_key, payload, attempt_count, published_at, traceparent, tracestate

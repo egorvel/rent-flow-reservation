@@ -49,7 +49,12 @@ class ReservationCancellationRollbackIT extends PostgresIntegrationTest {
     @Test
     void outboxWriteFailureRollsBackTheStatusAndReturnsSafeProblemDetails() throws Exception {
         Reservation reservation = reservations.saveAndFlush(new Reservation(
-                "ROLLBACK-001", "CUSTOMER-001", "ORDER-001", LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3)));
+                "ROLLBACK-001",
+                "CUSTOMER-001",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                "ORDER-001",
+                LocalDate.of(2026, 10, 1),
+                LocalDate.of(2026, 10, 3)));
         doThrow(new IllegalStateException("sensitive persistence detail"))
                 .when(outboxes)
                 .save(any(ReservationCancellationOutbox.class));

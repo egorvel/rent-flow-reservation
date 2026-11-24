@@ -94,6 +94,7 @@ class ReservationMonitoringIT extends PostgresIntegrationTest {
         reservations.saveAndFlush(new Reservation(
                 "MONITOR-OVERDUE",
                 "customer",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
                 "order",
                 LocalDate.of(2026, 10, 1),
                 LocalDate.of(2026, 10, 3),

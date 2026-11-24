@@ -1,11 +1,18 @@
 # Reservation Creation Implementation Tasks
 
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+
 Status: Implemented and verified.
 
 This is the historical completed task plan. Current internal ownership is documented in
 `design.md` §1.2 and §6: creation outcome values are nested under their owner, and creation-ledger
 cleanup now uses the shared `ReservationCleanupService` and `ReservationCleanupScheduledService`.
-Those structural changes do not alter the task outcomes or acceptance evidence below.
+Those structural changes do not alter the task outcomes. The ownership/idempotency assertions
+below now follow the current security contract; earlier dated evidence remains historical.
 
 Each task is one safe commit. The dependency graph is:
 
@@ -29,15 +36,16 @@ graph LR
 
 **Scope.**
 
-- Rewrite the unshipped V2 migration and remove V3.
+- Retain the completed V2 terminal-ledger redesign as history; use the consolidated security V6
+  for current ownership and scoped keys. Do not rewrite V1–V5 or remove cancellation V3.
 - Reduce the creation-request entity and repository to Inventory-style terminal idempotency.
 - Add advisory locking, PostgreSQL UTC time, terminal replay, expiry replacement, and cleanup
   queries.
 
 **DoD.**
 
-- Migration tests assert that V1 and replacement V2 apply and that the ledger has exactly six
-  columns: key, fingerprint, HTTP status, outcome, recorded time, and expiry.
+- Migration tests apply V1–V6 and assert the eight-column ledger: caller scope, key, target subject,
+  fingerprint, HTTP status, outcome, recorded time and expiry, with a composite scope/key primary key.
 - PostgreSQL constraints reject invalid fingerprints, statuses, outcome/status disagreement, and
   expiry disagreement.
 - Tests prove the advisory lock is immediate, an exact row can be locked, database UTC date is
@@ -67,13 +75,18 @@ graph LR
 **DoD.**
 
 - Tests prove successful batches persist all reservations and the exact `201` snapshot atomically
-  and preserve request ordering.
+  and preserve request ordering. POST accepts only orderId/items, derives response customerId and
+  persisted issuer from authentication, accepts long opaque subjects without provisioning/provider
+  lookup, and rejects customerId/customerIssuer inputs with 400.
 - Tests prove command validation and every known local/Inventory rejection persist terminal
-  outcomes and replay them without another local query, Inventory call, or reservation write.
+  outcomes and replay them without another active-reservation query, Inventory call or write;
+  current create permission and live issuer/subject ownership remain required for successful replay.
 - Tests prove response loss followed by a same-key retry can use Inventory's replay and commit the
   local success.
 - Tests prove matching replay preserves IDs, timestamps, status, body, and expiry; mismatch returns
-  `422`; concurrent same-key execution returns immediate `409` and `Retry-After: 1`.
+  `422`; concurrent same-caller/same-key execution returns immediate `409` and `Retry-After: 1`.
+  Equal external UUIDs across subjects produce independent rows, locks and downstream keys;
+  staff/customer successful replay after deletion returns 404 without snapshot/replay headers.
 - Active checks cover HELD, CONFIRMED, CANCELLED, expired end date, end date equal to today, future
   start, case sensitivity, and complete request-ordered failures.
 - Different-key competing requests prove Inventory permits at most one successful batch.
@@ -100,8 +113,8 @@ graph LR
 
 **DoD.**
 
-- Tests prove resource access and HTTP 502/503/504 produce at most five calls with the same key and
-  payload.
+- Tests prove resource access and HTTP 502/503/504 produce at most five calls with the same derived downstream key and payload. Tests assert this key differs across
+  issuer/subject scopes while renewal and approved-client changes keep it stable.
 - Tests prove nominal waits of 200, 400, 800, and 1600 ms with ±20-percent jitter without sleeping.
 - HTTP 500, terminal 4xx results, decoded business results, and unexpected normal statuses are not
   retried.
@@ -122,7 +135,7 @@ graph LR
 
 **Scope.**
 
-- Adapt the cleanup-only scheduler to the six-column ledger.
+- Adapt the cleanup-only scheduler to the caller-scoped ledger.
 - Update OpenAPI, README, the implementation walkthrough, and the system-design decision note.
 - Remove documentation of leases, phases, client-driven workflow resumption, and reconciliation.
 
@@ -133,7 +146,7 @@ graph LR
 - Metrics use bounded outcome labels and contain no identifiers or request values.
 - OpenAPI tests cover the batch request, terminal replay headers, busy/mismatch behavior, retry
   guidance, and applicable 201/400/409/422/502/503 responses.
-- README and walkthrough describe the six-column terminal table, one synchronous transaction, five
+- README and walkthrough describe the eight-column terminal table with composite caller-scope/key identity, one synchronous transaction, five
   foreground attempts, stored business outcomes, unstored infrastructure failures, and cleanup-only
   background work.
 - Source and docs contain no recovery scheduler, durable retry queue, processing lease, retry
@@ -160,7 +173,8 @@ graph LR
 
 - Every acceptance criterion has a regression assertion that would fail if its observable behavior
   changed.
-- Migration tests confirm only V1 and the replacement V2 are required from an empty schema.
+- Migration tests confirm V1–V6 reach the final schema, the V5→V6 cutover runs once, no mapping
+  table exists, and repeating Flyway preserves new business/outbox/replay rows.
 - Architecture tests confirm Reservation has no Inventory repository or direct Inventory-schema
   access.
 - `git diff --check` reports no whitespace errors.

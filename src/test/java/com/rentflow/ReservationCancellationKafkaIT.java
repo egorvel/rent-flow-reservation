@@ -149,6 +149,7 @@ class ReservationCancellationKafkaIT extends PostgresIntegrationTest {
         Reservation reservation = new Reservation(
                 "KAFKA-EXPIRED",
                 "CUSTOMER-001",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
                 "ORDER-EXPIRED",
                 LocalDate.of(2026, 10, 1),
                 LocalDate.of(2026, 10, 3),
@@ -172,7 +173,12 @@ class ReservationCancellationKafkaIT extends PostgresIntegrationTest {
 
     private Reservation reservation(String orderId) {
         return new Reservation(
-                "KAFKA-ORDER", "CUSTOMER-001", orderId, LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 3));
+                "KAFKA-ORDER",
+                "CUSTOMER-001",
+                com.rentflow.support.SignedJwtFixture.SHARED.issuer(),
+                orderId,
+                LocalDate.of(2026, 10, 1),
+                LocalDate.of(2026, 10, 3));
     }
 
     private List<ConsumerRecord<byte[], byte[]>> consume(int expectedCount) {

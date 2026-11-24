@@ -2,10 +2,9 @@ package com.rentflow.model;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.UUID;
 import jakarta.persistence.Column;
+import jakarta.persistence.EmbeddedId;
 import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 import org.hibernate.annotations.JdbcTypeCode;
@@ -14,9 +13,11 @@ import org.hibernate.type.SqlTypes;
 @Entity
 @Table(name = "reservation_creation_requests", schema = "reservation")
 public class ReservationCreationRequest {
-    @Id
-    @Column(name = "idempotency_key", nullable = false)
-    private UUID idempotencyKey;
+    @EmbeddedId
+    private ReservationCreationRequestId id;
+
+    @Column(name = "target_customer_id", nullable = false, columnDefinition = "text")
+    private String targetCustomerId;
 
     @Column(nullable = false, length = 64)
     private String fingerprint;
@@ -36,11 +37,13 @@ public class ReservationCreationRequest {
 
     protected ReservationCreationRequest() {}
 
-    public ReservationCreationRequest(UUID idempotencyKey) {
-        this.idempotencyKey = idempotencyKey;
+    public ReservationCreationRequest(ReservationCreationRequestId id) {
+        this.id = id;
     }
 
-    public void complete(String fingerprint, ReservationCreationOutcome outcome, Instant databaseTime) {
+    public void complete(
+            String fingerprint, ReservationCreationOutcome outcome, Instant databaseTime, String targetCustomerId) {
+        this.targetCustomerId = targetCustomerId;
         this.fingerprint = fingerprint;
         this.outcome = outcome;
         this.httpStatus = outcome.status();
@@ -50,6 +53,10 @@ public class ReservationCreationRequest {
 
     public String getFingerprint() {
         return fingerprint;
+    }
+
+    public String getTargetCustomerId() {
+        return targetCustomerId;
     }
 
     public ReservationCreationOutcome getOutcome() {

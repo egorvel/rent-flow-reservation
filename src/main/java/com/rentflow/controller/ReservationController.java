@@ -105,13 +105,14 @@ public class ReservationController {
             operationId = "createReservation",
             summary = "Create an atomic batch of HELD reservations",
             description =
-                    "Each item must start on or after the PostgreSQL UTC date. Terminal outcomes replay for seven days from a compact database ledger; creation runs only within the incoming request.",
+                    "Approved human client with reservation:create; customer ownership is assigned from the verified token issuer and subject. orderId is an unverified reference. Current authorization precedes issuer/subject-scoped replay. Each item must start on or after the PostgreSQL UTC date. Terminal outcomes replay for seven days from a compact database ledger; creation runs only within the incoming request.",
             parameters =
                     @Parameter(
                             name = "Idempotency-Key",
                             in = ParameterIn.HEADER,
                             required = true,
-                            description = "Endpoint-global canonical UUID v4 used for retry and replay.",
+                            description =
+                                    "Canonical UUID v4 scoped to verified issuer/subject. Current authorization precedes replay; expires after seven days.",
                             schema =
                                     @Schema(
                                             type = "string",
@@ -205,7 +206,11 @@ public class ReservationController {
         return response.contentType(contentType).body(result.body());
     }
 
-    @Operation(operationId = "getReservation", summary = "Retrieve a reservation")
+    @Operation(
+            operationId = "getReservation",
+            summary = "Retrieve a reservation",
+            description =
+                    "Approved human client with reservation:read for its verified issuer/subject owner, or reservation:read:any. Missing and foreign rows return the same 404.")
     @ApiResponses({
         @ApiResponse(responseCode = "200", description = "Reservation found."),
         @ApiResponse(
@@ -225,7 +230,7 @@ public class ReservationController {
             operationId = "cancelReservation",
             summary = "Cancel a reservation",
             description =
-                    "Changes an eligible reservation to CANCELLED and durably records an event for asynchronous Inventory release. A 204 response reports only the committed Reservation outcome; Kafka publication and Inventory release may complete later.")
+                    "Approved human client with reservation:cancel for its verified issuer/subject owner, or reservation:cancel:any. Missing and foreign rows return the same 404. Changes an eligible reservation to CANCELLED and durably records an event for asynchronous Inventory release. A 204 response reports only the committed Reservation outcome; Kafka publication and Inventory release may complete later.")
     @ApiResponses({
         @ApiResponse(
                 responseCode = "204",
@@ -249,7 +254,7 @@ public class ReservationController {
             operationId = "replaceReservation",
             summary = "Fully replace reservation details and status",
             description =
-                    "Preserves ID, creation timestamp, and hold deadline; requires every mutable field. Any status is accepted without transition rules. Does not create missing reservations.")
+                    "Approved human client with reservation:manage; preserves the original owner and may change order and set any defined status. Emits no cancellation event and does not release Inventory. Preserves ID, creation timestamp, and hold deadline; requires every mutable field. Any status is accepted without transition rules. Does not create missing reservations.")
     @ApiResponses({
         @ApiResponse(responseCode = "200", description = "Reservation replaced."),
         @ApiResponse(
@@ -271,7 +276,8 @@ public class ReservationController {
     public ReservationDTO replace(
             @PathVariable UUID id,
             @io.swagger.v3.oas.annotations.parameters.RequestBody(
-                            description = "All six mutable fields; do not send ID, timestamp, or holdExpiresAt.",
+                            description =
+                                    "All five mutable fields; do not send ID, customerId, timestamp, or holdExpiresAt.",
                             required = true,
                             content =
                                     @Content(
@@ -280,7 +286,6 @@ public class ReservationController {
                                             examples = @ExampleObject(name = "replacement", value = """
                                     {
                                       "serialNumber": "DRILL-001",
-                                      "customerId": "CUSTOMER-001",
                                       "orderId": "ORDER-001",
                                       "startDate": "2026-10-01",
                                       "endDate": "2026-10-03",
@@ -290,10 +295,14 @@ public class ReservationController {
                     @Valid @RequestBody
                     ReservationDTO request) {
         validatePeriod(request.startDate(), request.endDate());
-        return converter.toResponse(service.replace(id, converter.toModel(request)));
+        return converter.toResponse(service.replace(id, converter.toCommand(request)));
     }
 
-    @Operation(operationId = "deleteReservation", summary = "Permanently delete a reservation")
+    @Operation(
+            operationId = "deleteReservation",
+            summary = "Permanently delete a reservation",
+            description =
+                    "Approved human client with reservation:manage. Permanent deletion does not emit a cancellation event or release Inventory.")
     @ApiResponses({
         @ApiResponse(responseCode = "204", description = "Reservation deleted.", content = @Content),
         @ApiResponse(
@@ -314,7 +323,7 @@ public class ReservationController {
             operationId = "listReservations",
             summary = "Browse a bounded reservation page",
             description =
-                    "Ties use id ASC. Unknown, repeated, blank, or invalid parameters are rejected; filtering is unsupported. The page * size offset must not exceed 2147483647.")
+                    "Approved human client with reservation:list for its verified issuer/subject owner and scoped totals, or reservation:list:any for all customers. Ties use id ASC. Unknown, repeated, blank, or invalid parameters are rejected; filtering is unsupported. The page * size offset must not exceed 2147483647.")
     @ApiResponse(responseCode = "200", description = "Reservation page, including accurate totals for empty pages.")
     @GetMapping
     public PagedModel<ReservationDTO> list(

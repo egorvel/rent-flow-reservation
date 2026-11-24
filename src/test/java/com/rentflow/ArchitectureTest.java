@@ -75,7 +75,7 @@ class ArchitectureTest {
                 .whereLayer("Model")
                 .mayNotAccessAnyLayer()
                 .whereLayer("Config")
-                .mayOnlyAccessLayers("Dto", "Service", "Properties")
+                .mayOnlyAccessLayers("Dto", "Service", "Properties", "Converter")
                 .whereLayer("Properties")
                 .mayNotAccessAnyLayer()
                 .whereLayer("Util")
@@ -194,8 +194,10 @@ class ArchitectureTest {
     }
 
     @Test
-    void applicationCodeDoesNotDependOnSpringSecurity() {
+    void securityDependenciesStayOutOfPersistenceAndDataPackages() {
         noClasses()
+                .that()
+                .resideInAnyPackage("..model..", "..repository..", "..dto..", "..util..", "..properties..")
                 .should()
                 .dependOnClassesThat()
                 .resideInAPackage("org.springframework.security..")

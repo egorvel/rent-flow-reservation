@@ -1,6 +1,12 @@
 # Reservation Creation Design
 
-Status: Approved for implementation.
+Current API ownership and authorization are defined by [security](../security/design.md) §3–§5.
+Its token-derived immutable owner, strict owner-input rejection and caller-scoped replay supersede
+this feature's original pre-security assumptions. Historical delivery/acceptance notes below are
+not instructions to restore anonymous access or older schemas. Verification uses the linked
+current contracts in place of superseded historical assertions; earlier dated reports remain unchanged.
+
+Status: Implemented; ownership and idempotency descriptions aligned with the current security API.
 
 ## 1. Scope and structure
 
@@ -54,6 +60,13 @@ Inventory's service pattern.
 
 ### 2.1 Request validation and fingerprint
 
+POST accepts `CreateReservationsRequest` with only `orderId` and `items`. It has no customer owner
+input. The authorized service obtains a CustomerIdentity from verified `iss`/`sub`, assigns the subject
+as response-only `customerId`, and persists the issuer alongside it. Supplied `customerId` or
+`customerIssuer` is rejected with `400` before service/ledger/Inventory work. The subject remains an
+opaque string, without the former 64-character business-ID limit or UUID parsing. Staff also creates
+for itself; no mapping or Keycloak lookup is needed.
+
 Spring/Jackson performs request binding and structural validation before invoking creation. Missing
 or malformed JSON, unknown properties, missing fields, invalid date syntax, invalid collection
 bounds, and missing/invalid keys return `400`, do not consume the key, and do not call Inventory.
@@ -62,28 +75,31 @@ The service validates rules that require the complete command: duplicate case-se
 numbers, supported year range, end before start, and start before the current PostgreSQL UTC date.
 A command-level validation failure is a terminal `400 VALIDATION_FAILED` outcome and is stored.
 
-The SHA-256 fingerprint is computed from a version marker and length-prefixed values for
-`customerId`, `orderId`, item count, and each item's serial number and dates in request order.
+The SHA-256 payload fingerprint is computed from `reservation-creation-v2`, length-prefixed
+`orderId`, item count, and each item's serial number and dates in request order. Ownership is bound
+separately by the issuer/subject caller scope, not included again as a payload field.
 JSON whitespace and object-property order do not affect it. Item order and string case do.
 
 ### 2.2 New attempt
 
 `ReservationCreationService.create` is one local transaction:
 
-1. Compute the fingerprint.
-2. Acquire a transaction-scoped PostgreSQL advisory lock derived from the key with
+1. Enforce current create permission, read the verified issuer/subject owner, derive the caller
+   scope and compute the owner-free payload fingerprint.
+2. Acquire a transaction-scoped PostgreSQL advisory lock derived from the caller scope and external key with
    `pg_try_advisory_xact_lock`. Return immediate busy if unavailable.
-3. Lock the exact ledger row, if present.
-4. Replay or reject an unexpired row; otherwise continue as a new attempt.
+3. Lock the exact composite (caller_scope, idempotency_key) ledger row, if present.
+4. Recheck stored target subject, reject fingerprint mismatches and verify successful snapshot
+   ownership before replaying an unexpired row; otherwise continue as a new attempt.
 5. Read PostgreSQL time and derive the UTC date without depending on the session timezone.
 6. Validate command-level date and batch rules. Persist and return a terminal validation outcome
    when invalid.
 7. Query active local reservations once for all unique requested serial numbers. Persist and
    return a terminal conflict when any are active.
-8. Call Inventory once logically; Resilience4j may issue up to five physical attempts.
+8. Call Inventory once logically with the derived downstream UUID; Resilience4j may issue up to five physical attempts.
 9. Map a known Inventory business rejection to a terminal Reservation outcome, store it, and
    return it.
-10. On Inventory success, create all `HELD` reservations, flush them, build the response snapshot,
+10. On Inventory success, create all `HELD` reservations under the verified issuer/subject owner, flush them, build the response snapshot,
     store the `201` outcome, and commit.
 
 The advisory lock and local transaction remain open during the Inventory call. This is an explicit
@@ -134,7 +150,10 @@ transition after response loss.
 
 ### 3.1 Execution lock
 
-The execution lock ID is deterministically derived from the UUID using the existing SHA-256 helper.
+The ledger identity is `(caller_scope, idempotency_key)`. The scope hashes the verified issuer and
+subject; the execution lock and Inventory UUID additionally include the external key, using the
+exact length-prefixed SHA-256 tuples in [security design](../security/design.md) §5.1. Equal payload
+fingerprints and external UUIDs from different subjects never share ledger records or downstream keys.
 `pg_try_advisory_xact_lock` returns immediately. Failure returns a
 `ReservationCreationService.Result` with `409 IDEMPOTENCY_IN_PROGRESS`; the controller adds
 `Retry-After: 1`.
@@ -146,7 +165,10 @@ No lease or takeover rule is necessary.
 ### 3.2 Existing row and replay
 
 After acquiring the advisory lock, the service loads the ledger row with a pessimistic write lock.
-If its `expiresAt` is after current PostgreSQL time:
+If its `expiresAt` is after current PostgreSQL time, recheck current `reservation:create` and the
+stored target subject; successful replay also verifies that every saved ID still exists under the
+same issuer/subject. Deleted or foreign success rows yield concealed `404` without replay headers,
+including for staff. Subject mismatch yields generic `403`. Once authorized:
 
 - a different fingerprint raises the mismatch variant and maps to
   `422 IDEMPOTENCY_KEY_REUSED`;
@@ -155,7 +177,8 @@ If its `expiresAt` is after current PostgreSQL time:
 
 Replay performs no current-date validation, active lookup, Inventory call, or reservation write.
 The complete success or failure response is reconstructed from the stored outcome rather than from
-current reservation rows.
+current reservation rows; the ownership query is an authorization check, not a reconstruction of
+the response. Cancelled but still-owned rows replay their original creation snapshot.
 
 If the row is expired, the service ignores its fingerprint and reuses the entity for the new
 terminal outcome. Cleanup racing with execution is safe because both operations lock the row.
@@ -176,17 +199,14 @@ from the row's expiry and replay flag.
 
 ## 4. Persistence
 
-### 4.1 Replacement V2 migration
+### 4.1 Migration history and current schema
 
-The reservation-creation migration has not been released independently, so this redesign replaces
-`V2__reservation_creation_requests.sql` and removes V3. V2 contains:
-
-- the existing PostgreSQL default for `reservations.created_at`;
-- `reservation.reservation_creation_requests`;
-- one expiry index for cleanup;
-- the active-reservation lookup index on `reservations`.
-
-No migration creates or later removes workflow columns.
+V2 introduced the terminal ledger, created_at default, expiry index and active-reservation index.
+The old unshipped workflow-replacement plan is completed history, not an instruction to rewrite
+V2 or remove today's V3 cancellation migration. The current consolidated security V6 upgrades V5
+as specified in [security design](../security/design.md) §5.2: one authorized development reset,
+issuer/subject ownership and composite ledger keys, without an intermediate mapping table.
+Shipped V1–V5 remain unchanged. Reapplying the current migration set preserves post-cutover rows.
 
 ### 4.2 Terminal ledger
 
@@ -194,7 +214,9 @@ No migration creates or later removes workflow columns.
 
 | Column | Type | Rule |
 | --- | --- | --- |
-| `idempotency_key` | `uuid` | Primary key |
+| `caller_scope` | `varchar(67)` | Verified issuer/subject hash; part of the primary key |
+| `idempotency_key` | `uuid` | External UUID; primary key together with caller_scope |
+| `target_customer_id` | `text` | Accepted authenticated subject; nonblank |
 | `fingerprint` | `varchar(64)` | Lowercase SHA-256 hex |
 | `http_status` | `integer` | One of 201, 400, 409, 422 |
 | `outcome` | `jsonb` | Object whose numeric `status` equals `http_status` |
@@ -207,7 +229,8 @@ because failure outcomes have no reservation rows and the stored response is an 
 
 ### 4.3 Repository queries
 
-Spring Data naming provides `findForUpdateByIdempotencyKey` under `PESSIMISTIC_WRITE`.
+Spring Data naming provides `findForUpdateById` with a `ReservationCreationRequestId` composite
+identifier under `PESSIMISTIC_WRITE`; no UUID-only lookup is used.
 Native SQL remains only where method naming cannot express PostgreSQL behavior:
 
 - `pg_try_advisory_xact_lock`;
@@ -234,15 +257,15 @@ Configuration:
 | Connect timeout | 500 ms |
 | Read timeout | 1500 ms |
 
-The nominal waits are 200, 400, 800, and 1600 ms. The public idempotency key and Inventory payload
-remain identical across attempts. Decoded terminal 4xx responses, HTTP 500, and unexpected normal
+The nominal waits are 200, 400, 800, and 1600 ms. The derived downstream Inventory key and payload remain identical across attempts; the public
+key remains scoped to the authenticated issuer/subject at the Reservation boundary. Decoded terminal 4xx responses, HTTP 500, and unexpected normal
 responses are not retried.
 
 ## 6. Cleanup and metrics
 
 `ReservationCleanupScheduledService` runs creation-ledger cleanup daily at 03:00 UTC by default.
 It delegates each chunk to `ReservationCleanupService` in a new transaction, deleting expired rows
-in chunks of 1000 ordered by expiry and key with `FOR UPDATE SKIP LOCKED`, and stops after the
+in chunks of 1000 ordered by expiry, caller scope and key, matching both key components, with `FOR UPDATE SKIP LOCKED`, and stops after the
 configured 60-second runtime budget. This entrypoint touches only the terminal ledger.
 
 The service records bounded values for idempotency attempt, replay, mismatch, and busy outcomes.
@@ -257,8 +280,8 @@ payloads never appear as metric labels.
 | Reservation process dies before commit | Local transaction and advisory lock roll back; same-key retry executes |
 | Inventory commits but response is lost | Local transaction rolls back; same-key retry receives Inventory's stored result |
 | Local reservation or ledger write fails after Inventory success | Local transaction rolls back; same-key retry replays Inventory and tries local commit again |
-| Same key arrives concurrently | One transaction executes; the other receives immediate busy |
-| Different keys target one item | Inventory serializes its item row; at most one transition succeeds |
+| Same caller scope and external key arrive concurrently | One transaction executes; the other receives immediate busy |
+| Different scoped keys target one item | Inventory serializes its item row; at most one transition succeeds |
 | Stored failure is retried after conditions change | Original failure replays until expiry |
 | Key is retried after expiry | Request executes as a new intent and replaces the row on terminal completion |
 | Cleanup and replay race | Row lock determines order; replay never reads a partially deleted row |
@@ -276,7 +299,7 @@ The controller returns the stored outcome's status and body. Stored results incl
 `Retry-After: 1`. Transient 502/503 responses carry no terminal expiry headers.
 
 The OpenAPI contract documents request bounds, active-reservation semantics, Inventory ownership,
-stored replay, mismatch and busy precedence, all response statuses, and five foreground attempts.
+token-derived response-only ownership, caller-scoped keys, authorized stored replay, mismatch and busy precedence, all response statuses, and five foreground attempts.
 README and the walkthrough explain that only the cleanup scheduler runs in the background; no
 creation attempt continues after its HTTP response.
 
@@ -286,5 +309,7 @@ Unit tests cover command validation, fingerprinting, Inventory response decoding
 retry selection without sleeping. PostgreSQL integration tests cover migration shape and
 constraints, advisory-lock concurrency, stored success/failure replay, expiry replacement, cleanup,
 active-reservation boundaries, Inventory mappings, and atomic local rollback. OpenAPI and ArchUnit
-tests cover the published contract and service boundaries. The final gate is
+tests cover the published contract and service boundaries. Signed-token security tests additionally
+prove request owner fields are rejected, new identities need no provisioning, issuer/subject-scoped
+keys remain separate, and staff cannot replay a deleted success. The final gate is
 `mvn -B -ntp clean verify`.
