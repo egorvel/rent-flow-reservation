@@ -630,8 +630,22 @@ The isolated container smoke uses the existing Inventory nginx fixture plus a te
 signing/token runner, its own PostgreSQL volume, private credential files and token-derived test owners.
 It retains runtime/persistence/CRUD/outage checks and adds authenticated ownership/replay denials;
 it proves no real Keycloak/Inventory interoperability. `RESERVATION_SMOKE_FAIL_AFTER_START=1`
-exercises cleanup after an intentional failure. See the [implementation acceptance](.specs/security/implementation-acceptance.md)
-for actual service evidence. Common's separate C1 must provision all eight human roles (STAFF now uses reservation:create), preserve
-both narrow machine grants, verify actual PKCE/service flows and restore
-`Combined container smoke verification passed`. Broader integrated operational acceptance and
-production hardening remain Phases 5 and 7; HTTP authentication does not secure Kafka publishers.
+exercises cleanup after an intentional failure. See [security verification and AC evidence](.specs/security/design.md#115-verification-evidence-and-ac-coverage)
+for dated local results, migration checks and regression-test coverage.
+
+Common C1 is complete: its [2026-11-24 full-stack record](../rent-flow-common/SECURITY_SPEC.md#17-reservation-implementation-handoff-c1--2026-11-24)
+reports exit 0 with `Keycloak foundation smoke verification passed`,
+`Reservation security interoperability verification passed` and
+`Combined container smoke verification passed`. Source review on 2026-11-25 confirmed the exact
+eight-role human policy, both narrow machine grants, actual PKCE/service flows and each caller's
+own read-only recipient mount. Common generates its UID 10001-owned mode-0400 runtime copy at
+`${SECURITY_STATE_DIR:-./.secrets/security}/runtime/reservation-recipient-secret` relative to Common;
+the original source credential stays host-owned and private. Follow
+[Common's delivery instructions](../rent-flow-common/README.md#local-keycloak) for explicit recipient
+refresh and caller recreation after rotation.
+
+These are recorded Common results, separate from fresh local verification; this documentation
+review does not rerun the combined stack or reset existing data. Broader integrated operational
+acceptance and production hardening remain Phases 5 and 7. The optional older Common observability
+demo does not acquire tokens; the full combined runner verifies authenticated observability.
+HTTP authentication does not secure Kafka publishers.

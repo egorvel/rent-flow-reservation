@@ -1,11 +1,11 @@
 # Reservation HTTP security requirements
 
-Status: Identity/API revision approved on 2026-11-24; implementation evidence is recorded separately; Common C1 pending.
-See [implementation acceptance](implementation-acceptance.md).
+Status: Reservation T1–T3 implemented; Common C1 completed on 2026-11-24.
+Verification scope and AC evidence: [design §11.5](design.md#115-verification-evidence-and-ac-coverage).
 
 ## Context
 
-Reservation is Phase 4 of the [RentFlow security plan](../../../SECURITY_PLAN.md).
+Reservation secures its API, customer ownership and Inventory calls.
 [Common's contract](../../../rent-flow-common/SECURITY_SPEC.md) provides the issuer,
 Keycloak clients and the narrow Reservation-to-Inventory grant. Inventory and Pricing have
 implemented their security phases. Before this feature, Reservation accepted anonymous CRUD, creation and
@@ -20,8 +20,11 @@ deadlines, cancellation events and worker guarantees remain the baseline.
 
 The user approved the first six policy recommendations and authorized discarding old creation
 replay records rather than maintaining a legacy runtime path. The user authorized Reservation
-implementation on 2026-11-19 and the identity/API revision on 2026-11-24. The latter authorizes discarding development reservations, cancellation outbox rows and replay records in V6; no running environment is reset by this task. Common policy and running-developer-environment changes remain a
-separate Common-scoped implementation request. The user subsequently authorized folding the
+implementation on 2026-11-19 and the identity/API revision on 2026-11-24. The latter authorizes
+discarding development reservations, cancellation outbox rows and replay records in V6; no running
+environment is reset by this task. Common implemented its policy and combined verification
+separately; its dated C1 evidence is linked in `design.md` §11.3. Running-developer-environment
+changes remain outside this task. The user subsequently authorized folding the
 security work into one commit with a single V6, replacing the earlier two migration files.
 
 ## User stories with acceptance criteria
@@ -169,7 +172,7 @@ As a maintainer, I want isolated service evidence and real-provider acceptance w
 - **AC8.2 (Event-driven).** When the isolated container smoke runs, the suite shall retain its
   runtime, creation/replay, persistence, CRUD and outage checks with authenticated fixtures, add
   ownership/denial assertions, and clean up only smoke-owned resources.
-- **AC8.3 (Event-driven).** When Common implements its handoff, its real-provider suite shall
+- **AC8.3 (Event-driven).** When Common runs combined verification, its real-provider suite shall
   provision the exact human policy, inject only Reservation's credential, use verified token subjects without mapping provisioning and verify real PKCE, machine claims and cross-customer denials using the
   actual services, restoring the complete combined smoke gate.
 - **AC8.4 (Ubiquitous).** The acceptance record shall distinguish specification evaluation,
@@ -178,8 +181,8 @@ As a maintainer, I want isolated service evidence and real-provider acceptance w
 
 ## Out of scope
 
-- Editing sibling repositories, infrastructure or the running developer realm. Common C1
-  requires its own implementation request.
+- Changing sibling runtime policy, infrastructure or the running developer realm. Common C1
+  is implemented separately; this review only retargets sibling documentation links to relocated evidence.
 - Order validation/orchestration, inbound machine callers, customer registration/account linking, staff creation on behalf of another customer,
   a public mapping-management API, user-token forwarding, token exchange or trusted user headers.
 - Legacy creation-ledger preservation, migration of its outcomes to subjects or a runtime legacy

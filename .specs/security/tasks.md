@@ -1,31 +1,31 @@
 # Reservation HTTP security tasks
 
-Status: Identity/API revision approved on 2026-11-24; implementation evidence is recorded separately; Common C1 pending.
-Historical baseline evidence: [implementation acceptance](implementation-acceptance.md).
+Status: Reservation T1–T3 implemented; Common C1 completed on 2026-11-24.
+Verification scope and AC evidence: [design §11.5](design.md#115-verification-evidence-and-ac-coverage).
 
 Six identity/API decisions were clarified and approved before this revision. Each task is one safe
 commit. The user authorized specs, self-evaluation and implementation, including discarding development
 reservation/outbox/replay records. Previous 2026-11-19 verification covers only the earlier mapping
-implementation. Leave source changes reviewable; no external Common changes or live environment reset.
+implementation. Common C1 was subsequently implemented in its own repository; no live environment reset is part of this review.
 
-Order: T1 -> T2 -> T3. C1 depends on T1 and T2 and can run alongside T3 once separately
-authorized. Local implementation acceptance requires T3; Phase 4 combined acceptance also requires
+Order: T1 -> T2 -> T3. C1 depends on T1 and T2 and was implemented separately in Common.
+Local implementation acceptance requires T3; Phase 4 combined acceptance also requires
 C1. T1 introduces persistence, inbound authorization, ownership and outbound credentials in one
 coherent secured cutover, without an unauthenticated intermediate compatibility path. Deploy using
 the stop/drain/migration/deploy sequence in `design.md` §11.4.
 
 Every Reservation implementation task requires `mvn -B -ntp clean verify`, BUILD SUCCESS and no skipped checks.
 If Spotless fails, run mvn spotless:apply and rerun the full lifecycle. Runtime/container changes
-require scripts/container-smoke-test.sh and its existing success message. These are future
-acceptance conditions; actual implementation results are recorded separately from the earlier
-unchanged-code planning build.
+require scripts/container-smoke-test.sh and its existing success message. These are the maintained
+acceptance conditions; dated local and external results are recorded
+in `design.md` §11.5 separately from specification evaluation.
 
 ## T1 — Enforce HTTP ownership and authenticate Inventory in one cutover
 
 **Commit:** feat: secure reservation operations and inventory claims
 
 **Depends on:** This agreed specification and a Reservation implementation request. Common's
-existing machine grant is available; isolated fixtures do not require the future human-policy task.
+machine grant is available; isolated fixtures do not depend on real-provider C1 verification.
 
 **Refs.** `requirements.md` AC1.1, AC1.2, AC1.3, AC1.4, AC2.1, AC2.2, AC2.3, AC2.4, AC2.5,
 AC2.6, AC3.1, AC3.2, AC3.3, AC3.4, AC4.1, AC4.2, AC4.3, AC4.4, AC4.5, AC5.1, AC5.2, AC5.3,
@@ -166,11 +166,11 @@ Docs stay disabled until T2. No sibling edits or running-realm changes.
 **Depends on:** T1 and T2.
 
 **Refs.** `requirements.md` AC8.1, AC8.2, AC8.3, AC8.4; `design.md` §5.2, §11.1, §11.2,
-§11.3, §11.4.
+§11.3, §11.4, §11.5.
 
 **DoD.**
 
-- A dated implementation-acceptance.md links every AC to actual regression-sensitive assertions,
+- Dated evidence in design §11.5 links every AC to actual regression-sensitive assertions,
   unskipped suite counts, full Maven BUILD SUCCESS and the exact local smoke success. It separately
   links specification evaluation; no planned policy is presented as runtime evidence.
 - Cutover instructions stop/drain old writers, coordinate final secured binary and consolidated V6
@@ -188,7 +188,9 @@ Docs stay disabled until T2. No sibling edits or running-realm changes.
 
 **Commit (Common repository):** feat: provision reservation permissions and verify secured workflows
 
-**Depends on:** T1, T2 and a separate Common-scoped implementation request. No current sibling edits.
+**State:** Implemented separately in Common; the dated 2026-11-24 run is linked in `design.md` §11.3.
+
+**Depends on:** T1, T2 and the separate Common-scoped implementation request under which C1 was completed.
 
 **Refs.** `requirements.md` AC2.1, AC2.3, AC2.5, AC3.1, AC3.3, AC4.1, AC4.2, AC5.1, AC5.2,
 AC5.3, AC6.1, AC7.1, AC8.3, AC8.4; `design.md` §3, §4.1, §5.1, §6, §7, §10, §11.3, §11.4.
@@ -214,7 +216,7 @@ AC5.3, AC6.1, AC7.1, AC8.3, AC8.4; `design.md` §3, §4.1, §5.1, §6, §7, §10
 - Real cancellation/outbox/expiry release and pricing/inventory/reservation workflows pass without
   widening machine grants or bypassing enforcement. Common's complete combined smoke prints
   Combined container smoke verification passed and cleanup leaves developer resources unchanged.
-  SECURITY_SPEC.md and the service acceptance link record actual Phase 4 evidence while broader
+  Common’s SECURITY_SPEC.md and design §11.5 record actual Phase 4 evidence while broader
   Phase 5 operational and Phase 7 production gates stay pending.
 
 ## Acceptance-criteria traceability

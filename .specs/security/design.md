@@ -1,11 +1,11 @@
 # Reservation HTTP security design
 
-Status: Identity/API revision approved on 2026-11-24; implementation evidence is recorded separately; Common C1 pending.
-See [implementation acceptance](implementation-acceptance.md).
+Status: Reservation T1–T3 implemented; Common C1 completed on 2026-11-24.
+Verification scope and AC evidence: [design §11.5](design.md#115-verification-evidence-and-ac-coverage).
 
 ## 1. Scope, architecture and existing patterns
 
-Implements `requirements.md` under the [global plan](../../../SECURITY_PLAN.md) and
+Implements `requirements.md` using the
 [Common contract](../../../rent-flow-common/SECURITY_SPEC.md), following the implemented
 [Inventory design](../../../rent-flow-inventory/.specs/security/design.md) and
 [Pricing design](../../../rent-flow-pricing/.specs/security/design.md).
@@ -308,13 +308,14 @@ a fixed Inventory base origin without userinfo/query/fragment. Require HTTPS out
 local/test profiles. Attach bearer credentials only to this group's destination, never a global
 builder, JWKS/token client or user-controlled URL. Do not forward a human token or X-User-* headers.
 
-Use standard Boot resource-server/client properties. Mount only Common's ignored recipient file
-.secrets/security/reservation-service-client-secret read-only as
+Use standard Boot resource-server/client properties. Common delivers a UID-readable recipient copy
+from its private source credential; its Compose source is
+${SECURITY_STATE_DIR:-./.secrets/security}/runtime/reservation-recipient-secret. Mount that copy read-only as
 /run/secrets/spring.security.oauth2.client.registration.inventory.client-secret and import
 optional:configtree:/run/secrets/. The property is still required if the directory is absent.
 Equivalent IDE injection uses a user-owned protected config-tree directory (0700, file 0600).
-Recipient copies must be readable by container UID 10001 without broadening original secret
-permissions. No secret in committed YAML, argv, shell history, image layers or config diagnostics.
+Common's recipient copy is owned by container UID 10001 with mode 0400 in a private directory;
+the original source remains host-owned with mode 0600. No secret in committed YAML, argv, shell history, image layers or config diagnostics.
 Local Compose takes an explicit source path and explicit nonsecret issuer/JWKS/token settings;
 it does not provision a realm or acquire tokens at startup. Rotation uses Common's explicit
 recipient-copy refresh and Reservation restart, without promised hot reload.
@@ -517,27 +518,42 @@ Do not claim real provider/Inventory/Kafka interoperability from the standalone 
 
 ### 11.3. Common implementation handoff
 
-C1 in `tasks.md` requires a separate Common-scoped request. Common must add exactly the eight client
-roles and explicit CUSTOMER/STAFF composites in §3, constrain reservation-access to those held
-human roles, and expose them only through reservation-swagger and optional rentflow-pkce-check
-scope. Retain existing Inventory/Pricing human grants and both narrow machine grants unchanged.
-Reapply/read-back policy must preserve subjects, keys and credentials and be a no-op when unchanged.
+Common completed C1 separately on 2026-11-24. Its [dated handoff evidence](../../../rent-flow-common/SECURITY_SPEC.md#17-reservation-implementation-handoff-c1--2026-11-24)
+records an exit-0 full combined run, including real-provider and actual-service assertions.
+The 2026-11-25 source review checked the realm template, independent token expectations, policy
+reconciliation, Compose recipient wiring and Reservation/combined smoke runners against this contract.
+This review uses that recorded run as external evidence; it does not claim a new Common execution.
 
-Mount only reservation-service's existing recipient secret into Reservation with canonical
-issuer/JWKS/token settings and runtime UID readability. Use real fixture token subjects directly
-as customer IDs; no database owner provisioning or customerId token mapper. Replace the previous
-create:any proposal with reservation:create in STAFF and preserve CUSTOMER own permissions. Real browser PKCE through both approved clients and actual
-Reservation/Inventory/Pricing images must prove ownership, staff powers, same-order isolation,
-cross-principal downstream-key separation, machine identity and all-RESERVED restriction, safe
-credential/downstream errors, token reuse/renewal, replay, cancellation/outbox/expiry workflows.
-HTTP-auth tests do not claim broker authentication. Provider tokens stay in runner memory.
+Common declares exactly the eight client roles and CUSTOMER/STAFF composites in §3. The
+reservation-access scope maps only those held roles; reservation-swagger attaches it by default
+and rentflow-pkce-check requests it optionally. Existing Inventory/Pricing human grants and the
+reserve-only Reservation/read-only Pricing machine grants are retained. Policy update/read-back
+and no-op reapply preserve subjects, signing keys and credentials.
 
-Reservation is the last unfinished HTTP caller: C1 restores the full combined workflow and must
-report `Combined container smoke verification passed`. Service-local tests/smoke can pass before
-C1; no real-provider or combined completion is claimed until C1 succeeds. Common Compose changes
-require Common's full gate; do not substitute a scoped partial success or weaken Inventory policy.
-Broader real-provider operational rotation/outage acceptance remains Phase 5 and production
-hardening remains Phase 7, even when Phase 4 combined acceptance passes.
+Base Common Compose supplies canonical issuer/JWKS/token URLs and only the caller's own read-only
+recipient at the config-tree destination in §6. Bootstrap/explicit recipient delivery and rotation
+prepare the UID 10001-readable copy. Real fixture token subjects establish ownership directly;
+there is no mapping SQL, provisioning step or customerId claim mapper.
+
+The real-provider suite covers Code + PKCE and refresh through both approved clients, actual
+Reservation/Inventory/Pricing images, own page totals and foreign get/cancel 404s, staff self-owned
+creation/any/manage powers, immutable ownership and no administrative release. Equal external keys
+produce distinct issuer/subject-derived Inventory keys; approved-client and cancelled-snapshot
+replay work, while reduced-create permission and deleted-row replay are denied.
+
+An observer validates actual signed reserve-only machine identity, all-RESERVED targets, reuse,
+30-second renewal and absence of human/X-User forwarding. Real wrong-audience 401, missing-grant
+403, bad recipient credentials and provider outage/renewal verify safe errors, 401 eviction versus
+403 retention, no authentication-driven same-call retry and preserved business/replay/outbox state.
+Authenticated cancellation/outbox/Kafka, expiration, cache, observability, recovery and retained-volume
+recreation pass in the complete runner, which reports `Combined container smoke verification passed`.
+Private test controls are capability-protected and restricted to the disposable smoke project;
+provider tokens stay in runner memory, and cleanup read-back leaves developer resources unchanged.
+
+Fresh disposable storage proves the consolidated V6 path, not a running-database cutover. The older
+optional Common observability demo does not acquire bearer tokens; authenticated combined acceptance
+uses the full runner instead. Broader operational/signing-key rotation acceptance remains Phase 5
+and production hardening remains Phase 7. HTTP-auth evidence does not authenticate Kafka publishers.
 
 ### 11.4. Release and acceptance records
 
@@ -552,10 +568,71 @@ migration of a running developer environment; isolated verification applies migr
 
 Every Reservation implementation task requires `mvn -B -ntp clean verify` with BUILD SUCCESS and no skip flags.
 If Spotless fails, apply formatting and rerun the full lifecycle. Runtime/container changes also
-require the service smoke success message. Record dated actual assertions/results in a future
-implementation-acceptance.md; separate specification review, local implementation, container and
-external Common gates. Specification evaluation and the current unchanged-code build prove no
-future security behavior. Do not mark implementation tasks complete based on planning evidence.
+require the service smoke success message. Record dated actual assertions/results in §11.5 and operational guidance in README; separate
+specification review, local implementation, container and external Common gates. Specification
+evaluation alone does not prove runtime behavior or complete implementation tasks.
+
+### 11.5. Verification evidence and AC coverage
+
+The approved direct-identity/API revision and consolidated V6 are implemented. Recorded local
+verification on 2026-11-24 used JDK 25.0.2 and `mvn -B -ntp clean verify`: **BUILD SUCCESS**,
+**91 unit + 244 integration = 335 tests**, zero failures/errors/skips. The consolidated-migration
+run finished at 21:37:11 Europe/Warsaw; no check was skipped. Earlier mapping-era evidence does
+not establish the revised API. Verification ran only against disposable test/smoke databases;
+no running developer database or realm was reset, repaired or migrated.
+
+SecurityMigrationIT upgrades seeded V5 through exactly one V6, clears the three authorized tables,
+asserts no mapping table and required identity/text/index constraints, tests long subjects and
+preserves new reservation/outbox/replay rows on reapply. Flyway history contains versions 1–6;
+shipped V1–V5 remain unchanged. Existing MigrationIT schema/role/restart checks also pass.
+
+The recorded final consolidated-migration service container smoke exited 0 on 2026-11-24 and printed
+`Container smoke test passed; removing its isolated containers and test volume`.
+It retained runtime, creation/replay/ownership, Inventory/DB outage, restart, retained-volume
+recreation and staff CRUD checks. The forced run with `RESERVATION_SMOKE_FAIL_AFTER_START=1`
+reached `ERROR: Intentional smoke failure for cleanup verification` and exited 1 as expected.
+Read-back after both runs found zero smoke containers, volumes, networks, private credential
+directories or signing-runner processes. These are fixture-service gates, distinct from Common's
+real-provider full-stack success recorded on 2026-11-24 in §11.3.
+
+The 2026-11-25 documentation review corrected stale C1 status and Common recipient-source details.
+Fresh `mvn -B -ntp clean verify` on JDK 25.0.2 finished at **2026-11-25 14:54:26 Europe/Warsaw**
+with **BUILD SUCCESS**, **91 unit + 244 integration = 335 tests**, zero failures/errors/skips
+and no skipped checks. Static checks confirmed Common's exact roles/composites against its
+independent token expectations, the narrow service-account grant, Python syntax and local
+documentation links. No Java, Compose or runtime-policy changes required new container runs;
+the container results above retain their actual 2026-11-24 dates. Specification reviews are
+recorded separately in [evaluation reports](eval-reports/), not as runtime acceptance evidence.
+Phase 5 operational/signing-key rotation and Phase 7 production hardening remain separate pending
+gates; Common's disposable acceptance does not perform the destructive V6 cutover on existing data.
+
+| ACs | Evidence |
+| --- | --- |
+| AC1.1, AC1.2 | [SecurityIT](../../src/test/java/com/rentflow/SecurityIT.java) signed required/invalid claims, algorithms/types, duplicate/query credentials and no-business-interaction assertions; [JWT validator tests](../../src/test/java/com/rentflow/config/ReservationJwtValidatorTest.java) |
+| AC1.3 | SecurityIT independent eight-permission/caller/method matrix, malformed denied bodies and unmatched routes |
+| AC1.4 | [Security config tests](../../src/test/java/com/rentflow/config/ReservationSecurityConfigTest.java) cached/unknown/overlapping keys and exact skew; [SecurityStartupIT](../../src/test/java/com/rentflow/SecurityStartupIT.java) actual startup/probes with unreachable providers |
+| AC2.1 | [SecurityPersistenceIT](../../src/test/java/com/rentflow/SecurityPersistenceIT.java) exact issuer/subject get/page/count/locked-query constraints, including equal subjects under different issuers; SecurityIT token-derived ownership and long subjects; no mapping provisioning |
+| AC2.2, AC2.4 | SecurityIT first-use access without provisioning and 400 owner-input rejection before business/Inventory work |
+| AC2.3, AC2.5, AC2.6 | SecurityIT customer get/list/totals/cancel, foreign/missing 404, same opaque order and unsupported filter denial; [ReservationIT](../../src/test/java/com/rentflow/ReservationIT.java) existing page/binding regressions |
+| AC3.1, AC3.3 | SecurityIT own/any/manage independence, staff self-owned creation and overgranted-machine denial |
+| AC3.2, AC3.4 | ReservationIT existing replacement/deletion/status/deadline/outbox assertions; SecurityIT immutable foreign owner during staff PUT and real locked cancellation versus staff deletion |
+| AC4.1 | [AuthenticatedIdempotencyTest](../../src/test/java/com/rentflow/service/AuthenticatedIdempotencyTest.java) exact independent hash/UUID vectors and namespace separation; SecurityIT actual distinct downstream gateway keys and approved-client replay |
+| AC4.2, AC4.3 | SecurityIT changed permission/target/current row ownership and staff replay denial after deletion; [InventoryOAuthIT](../../src/test/java/com/rentflow/InventoryOAuthIT.java) no local rows/ledger/headers on auth failure; ReservationIT existing fingerprint/expiry/rollback regressions |
+| AC4.4 | [SecurityMigrationIT](../../src/test/java/com/rentflow/SecurityMigrationIT.java) seeded V5→consolidated V6 reservation/outbox/replay reset, absent mapping, identity/index constraints, long identity text and no repeated reset |
+| AC4.5 | SecurityPersistenceIT same UUID across expired/unexpired scopes, independent backlog and selective cleanup; existing cleanup/monitoring tests |
+| AC5.1, AC5.2 | InventoryOAuthIT actual HTTP proxy/manager, fixed machine principal, all-RESERVED body, no user header relay, reuse/renewal and no-request gateway calls |
+| AC5.3 | InventoryOAuthIT complete token error/timeout/malformed/redirect matrix, 401-only eviction, 403 retention, unchanged circuit counts, no throwable security diagnostics and five identical-key resource attempts |
+| AC5.4 | [Client configuration tests](../../src/test/java/com/rentflow/config/InventoryClientConfigurationValidatorTest.java), [Boot registration tests](../../src/test/java/com/rentflow/InventoryClientConfigurationIT.java), OAuth transport/redirect assertions and smoke UID/file injection |
+| AC6.1 | Existing cancellation/expiry/outbox/relay/Kafka/monitoring tests retain no-context worker, transactional, ordering, recovery and trace assertions; actual Kafka release with real services recorded by Common C1 (§11.3) |
+| AC6.2, AC6.3, AC6.5 | SecurityIT real listener/probe/forwarded-header/private-metrics/stateless-denial assertions; SecurityStartupIT and existing observability tests |
+| AC6.4 | SecurityIT native metadata root/nested/encoded/trailing paths, exact four fields, query removal and malformed bearer independence; decoder outage fixture and cold-start metadata |
+| AC7.1, AC7.2 | [OpenApiIT](../../src/test/java/com/rentflow/OpenApiIT.java) exact six operations, PKCE scheme/initializer, local invalid bearer rejection; SecurityIT default docs denial; real browser PKCE recorded by Common C1 (§11.3) |
+| AC7.3 | SecurityIT exact safe responses/headers and synthetic marker logs; InventoryOAuthIT provider-error response/log/exported-span leakage checks |
+| AC7.4 | OpenApiIT operation-specific permissions/schemes/statuses, bounded security metrics implementation and README matrix/identity/cutover/file-delivery documentation |
+| AC8.1 | Full unskipped Maven lifecycle; actual [MethodSecurityIT](../../src/test/java/com/rentflow/MethodSecurityIT.java) non-web proxy; signed HTTP, real PostgreSQL and actual client tests above |
+| AC8.2 | [Container smoke](../../scripts/container-smoke-test.sh) signed A/B ownership/replay, admin denial, scoped key reuse, private management, runtime/CRUD/restart/volume/Inventory/DB outage and cleanup |
+| AC8.3 | Common’s dated C1 record and real-provider runners in §11.3: exact policy, real token subjects, PKCE/service flows and complete combined smoke |
+| AC8.4 | This section separates local and recorded external evidence; C1 passed, while broader Phase 5 operational / Phase 7 production gates remain pending |
 
 ## 12. Technical references
 
